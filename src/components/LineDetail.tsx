@@ -1,10 +1,32 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Bus, Download, MapPinned, RefreshCw, Star, WifiOff } from 'lucide-react';
+import {
+  ArrowLeft,
+  Bus,
+  Clock,
+  Download,
+  ExternalLink,
+  MapPinned,
+  RefreshCw,
+  Star,
+} from 'lucide-react';
 import { AlertBanner, Header, IconBtn, LineBadge } from './ui';
 import { DAY_LABEL, dayTypeOf, formatCountdown, minutesOfDay, useNow } from '../lib/time';
 import { REGION_LABEL } from '../data/faolLines';
-import { daysForLine, downloadAllDays, getTimetable, nextByColumn } from '../services/faolScraper';
-import type { DayCode, FaolAlert, FaolLine, MerusVehicle, Timetable, TimetableResult } from '../types';
+import {
+  daysForLine,
+  downloadAllDays,
+  faolTableUrl,
+  getTimetable,
+  nextByColumn,
+} from '../services/faolScraper';
+import type {
+  DayCode,
+  FaolAlert,
+  FaolLine,
+  MerusVehicle,
+  Timetable,
+  TimetableResult,
+} from '../types';
 
 interface Props {
   line: FaolLine;
@@ -18,16 +40,18 @@ interface Props {
 }
 
 const RAMAL_COLORS = ['#3b9cff', '#2dd4a0', '#fbbf24', '#f472b6', '#a78bfa', '#fb923c'];
-const ramalColor = (r?: string) => (r ? RAMAL_COLORS[(r.charCodeAt(0) - 65 + RAMAL_COLORS.length * 4) % RAMAL_COLORS.length] : undefined);
+const ramalColor = (r?: string) =>
+  r ? RAMAL_COLORS[(r.charCodeAt(0) - 65 + RAMAL_COLORS.length * 4) % RAMAL_COLORS.length] : undefined;
 
-type Loaded = Record<string, TimetableResult | 'loading'>;
+type Loaded = Partial<Record<DayCode, TimetableResult | 'loading'>>;
 
 export default function LineDetail(p: Props) {
   const today = dayTypeOf();
   const days = daysForLine(p.line.code);
-  const [day, setDay] = useState<DayCode>(today);
+  const [day, setDay] = useState<DayCode>(days.includes(today) ? today : days[0]);
   const [tables, setTables] = useState<Loaded>({});
   const [origin, setOrigin] = useState<string | null>(null);
+  const [onlyUpcoming, setOnlyUpcoming] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [dlMsg, setDlMsg] = useState<string | null>(null);
 
@@ -46,6 +70,7 @@ export default function LineDetail(p: Props) {
     if (!tables[today]) void load(today);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [today]);
+
   useEffect(() => {
     if (!tables[day]) void load(day);
     setOrigin(null);
@@ -61,199 +86,356 @@ export default function LineDetail(p: Props) {
     setDownloading(true);
     setDlMsg(null);
     const r = await downloadAllDays(p.line.code);
-    setDlMsg(`${r.ok} de ${r.total} tabelas baixadas para uso offline.`);
+    setDlMsg(`${r.ok} de ${r.total} tabelas salvas no aparelho para uso offline.`);
     for (const d of days) await load(d);
     setDownloading(false);
   };
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex-1 flex flex-col overflow-hidden bg-ink-950">
       <Header
-        title={`Linha ${p.line.code}`}
-        sub={`${p.line.name} · ${REGION_LABEL[p.line.region]}`}
+        title={`${p.line.code} · ${p.line.name}`}
+        sub={`Região ${REGION_LABEL[p.line.region]}`}
         right={
-          <>
-            <IconBtn onClick={p.onToggleFav} label="Favoritar linha"><Star size={20} className={p.isFav ? 'fill-warn text-warn' : ''} /></IconBtn>
-            <IconBtn onClick={p.onBack} label="Voltar"><ArrowLeft size={20} /></IconBtn>
-          </>
+          <div className="flex items-center gap-1.5">
+            <IconBtn onClick={p.onBack} label="Voltar">
+              <ArrowLeft className="w-5 h-5" />
+            </IconBtn>
+            <IconBtn onClick={p.onToggleFav} label="Favoritar linha" active={p.isFav}>
+              <Star className={`w-5 h-5 ${p.isFav ? 'fill-warn text-warn' : ''}`} />
+            </IconBtn>
+          </div>
         }
       />
-      <div className="scroll-y flex-1 px-4 py-4 space-y-4">
-        {p.alerts.map((a, i) => <AlertBanner key={i} alert={a} />)}
 
-        {/* Tempo real */}
-        <section className="rounded-2xl bg-ink-800 border border-ink-600 p-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <Bus className={p.vehicles.length ? 'text-go' : 'text-slate-500'} size={24} />
+      <div className="flex-1 scroll-y px-3 py-3 space-y-3.5">
+        {p.alerts.map((a, i) => (
+          <AlertBanner key={i} alert={a} />
+        ))}
+
+        {/* Card de Rastreamento em Tempo Real (Merus) */}
+        <div className="bg-ink-900 border border-ink-700 rounded-2xl p-3.5 space-y-2.5 shadow-md">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2.5">
+              <div
+                className={`h-9 w-9 rounded-xl grid place-items-center ${
+                  p.vehicles.length > 0 ? 'bg-go-soft text-go' : 'bg-ink-800 text-slate-400'
+                }`}
+              >
+                <Bus className="w-5 h-5" />
+              </div>
               <div>
-                <div className="num text-3xl leading-none font-semibold">{p.vehicles.length}</div>
-                <div className="text-xs text-slate-400 mt-1">{p.vehicles.length === 1 ? 'ônibus rodando agora' : 'ônibus rodando agora'}</div>
+                <div className="text-sm font-semibold text-white">
+                  {p.vehicles.length}{' '}
+                  {p.vehicles.length === 1 ? 'ônibus no GPS agora' : 'ônibus no GPS agora'}
+                </div>
+                <div className="text-xs text-slate-400">
+                  {p.vehicles.length > 0
+                    ? 'Rastreamento ao vivo Merus Tracker'
+                    : 'Sem sinal de GPS ativo nesta linha agora'}
+                </div>
               </div>
             </div>
-            <button
-              onClick={p.onShowOnMap}
-              disabled={!p.vehicles.length}
-              className="flex items-center gap-2 h-11 px-4 rounded-full bg-go text-ink-950 font-semibold disabled:bg-ink-700 disabled:text-slate-500"
-            >
-              <MapPinned size={18} /> Ver no mapa
-            </button>
+
+            {p.vehicles.length > 0 && (
+              <button
+                onClick={p.onShowOnMap}
+                className="h-9 px-3.5 rounded-xl bg-go text-ink-950 text-xs font-bold flex items-center gap-1.5 shadow active:scale-95 transition"
+              >
+                <MapPinned className="w-4 h-4" />
+                Ver no Mapa
+              </button>
+            )}
           </div>
-          {p.vehicles.length === 0 && <div className="text-sm text-slate-400 mt-3">Nenhum ônibus desta linha com GPS ativo neste momento.</div>}
+
           {p.vehicles.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-2">
+            <div className="flex flex-wrap gap-1.5 pt-1">
               {p.vehicles.slice(0, 8).map((v) => (
-                <span key={v.id} className="text-xs bg-ink-700 rounded-md px-2 py-1 text-slate-300">
-                  {v.id}{v.direction ? ` · ${v.direction}` : ''}
+                <span
+                  key={v.id}
+                  className="text-xs bg-ink-800 border border-ink-600 text-slate-200 px-2.5 py-1 rounded-lg"
+                >
+                  Carro <b>{v.id}</b>
+                  {v.direction ? ` · ${v.direction}` : ''}
                 </span>
               ))}
             </div>
           )}
-        </section>
+        </div>
 
-        {/* Próxima saída */}
-        <NextDeparture table={todayTable} loading={todayRes === 'loading' || !todayRes} today={today} />
+        {/* Painel Inteligente de Próximas Saídas (Estação Livre vs Bairro) */}
+        <NextDeparture
+          table={todayTable}
+          loading={todayRes === 'loading' || !todayRes}
+          today={today}
+        />
 
-        {/* Grade */}
-        <section>
-          <div className="flex items-center justify-between mb-2">
-            <h2 className="font-sign text-xl font-semibold">Grade de horários</h2>
-            <button onClick={() => load(day, true)} className="h-9 w-9 grid place-items-center rounded-full text-slate-300 active:bg-ink-700" aria-label="Atualizar tabela">
-              <RefreshCw size={16} className={viewRes === 'loading' ? 'animate-spin' : ''} />
-            </button>
+        {/* Seletor de Grade de Horários */}
+        <div className="bg-ink-900 border border-ink-700 rounded-2xl p-3.5 space-y-3 shadow-md">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Clock className="w-4 h-4 text-route" />
+              <h3 className="font-semibold text-sm text-white">Grade Programada (FAOL)</h3>
+            </div>
+            <div className="flex items-center gap-1">
+              <a
+                href={faolTableUrl(p.line.code, day)}
+                target="_blank"
+                rel="noreferrer"
+                className="h-8 px-2.5 rounded-lg bg-ink-800 border border-ink-600 text-xs text-slate-300 flex items-center gap-1"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                Original
+              </a>
+              <button
+                onClick={() => load(day, true)}
+                className="h-8 w-8 grid place-items-center rounded-lg bg-ink-800 border border-ink-600 text-slate-300 active:bg-ink-700"
+                aria-label="Atualizar tabela"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
-          <div className="flex gap-2 mb-3 overflow-x-auto scroll-y">
+
+          {/* Abas de Dia da Semana */}
+          <div className="flex gap-1.5 overflow-x-auto pb-1">
             {days.map((d) => (
               <button
                 key={d}
                 onClick={() => setDay(d)}
-                className={`shrink-0 h-10 px-4 rounded-full text-sm font-medium border ${day === d ? 'bg-route text-ink-950 border-route' : 'bg-ink-800 border-ink-600 text-slate-300'}`}
+                className={`shrink-0 h-9 px-3.5 rounded-xl text-xs font-semibold border transition ${
+                  day === d
+                    ? 'bg-route text-ink-950 border-route shadow'
+                    : 'bg-ink-800 border-ink-600 text-slate-300'
+                }`}
               >
-                {DAY_LABEL[d]}{d === today ? ' · hoje' : ''}
+                {DAY_LABEL[d]}
+                {d === today ? ' (Hoje)' : ''}
               </button>
             ))}
           </div>
 
           {viewRes === 'loading' || !viewRes ? (
-            <div className="text-slate-400 text-sm py-6 text-center">Carregando tabela…</div>
+            <div className="py-8 text-center text-sm text-slate-400 animate-pulse">
+              Consultando horários da linha {p.line.code}…
+            </div>
           ) : !viewTable ? (
-            <div className="rounded-xl bg-halt-soft border border-halt/40 text-sm p-3">{viewRes.error}</div>
+            <div className="p-3.5 rounded-xl bg-warn-soft/60 border border-warn/40 text-xs text-amber-200 space-y-2">
+              <div>{viewRes.error}</div>
+            </div>
           ) : (
-            <Grid table={viewTable} fromCache={viewRes.fromCache} origin={origin} setOrigin={setOrigin} isToday={day === today} />
+            <Grid
+              table={viewTable}
+              fromCache={viewRes.fromCache}
+              origin={origin}
+              setOrigin={setOrigin}
+              isToday={day === today}
+              onlyUpcoming={onlyUpcoming}
+              setOnlyUpcoming={setOnlyUpcoming}
+            />
           )}
-        </section>
+        </div>
 
+        {/* Botão Offline */}
         <button
           onClick={download}
           disabled={downloading}
-          className="w-full h-12 rounded-xl border border-ink-600 bg-ink-800 flex items-center justify-center gap-2 font-medium active:bg-ink-700 disabled:opacity-60"
+          className="w-full h-11 rounded-2xl bg-ink-800 border border-ink-600 text-sm font-semibold text-slate-200 flex items-center justify-center gap-2 active:bg-ink-700 disabled:opacity-50"
         >
-          <Download size={18} /> {downloading ? 'Baixando…' : 'Baixar todas as tabelas para uso offline'}
+          <Download className="w-4 h-4 text-route" />
+          {downloading ? 'Salvando tabelas…' : 'Salvar todas as tabelas para uso Offline'}
         </button>
-        {dlMsg && <div className="text-sm text-slate-300 text-center">{dlMsg}</div>}
+        {dlMsg && <div className="text-xs text-center text-go">{dlMsg}</div>}
+
+        <LineBadge code={p.line.code} size="sm" />
       </div>
     </div>
   );
 }
 
-function NextDeparture({ table, loading, today }: { table: Timetable | null; loading: boolean; today: DayCode }) {
-  const now = useNow(1000);
+function NextDeparture({
+  table,
+  loading,
+  today,
+}: {
+  table: Timetable | null;
+  loading: boolean;
+  today: DayCode;
+}) {
+  const now = useNow(5000);
   const rows = useMemo(() => (table ? nextByColumn(table, minutesOfDay(now)) : []), [table, now]);
-  const terminal = rows.filter((r) => r.isTerminal);
-  const bairros = rows.filter((r) => !r.isTerminal);
 
   return (
-    <section className="rounded-2xl bg-ink-800 border border-ink-600 p-4">
-      <div className="flex items-baseline justify-between mb-3">
-        <h2 className="font-sign text-xl font-semibold">Próxima saída</h2>
-        <span className="text-xs text-slate-400">{DAY_LABEL[today]}</span>
+    <div className="bg-ink-900 border border-ink-700 rounded-2xl p-3.5 space-y-2.5 shadow-md">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-bold uppercase tracking-wider text-route">
+          Próximas Saídas · {DAY_LABEL[today]}
+        </span>
       </div>
-      {loading && <div className="text-sm text-slate-400">Carregando…</div>}
-      {!loading && !table && <div className="text-sm text-slate-400">Tabela de hoje indisponível.</div>}
-      {table && !rows.some((r) => r.next) && <div className="text-sm text-slate-300">Não há mais saídas hoje.</div>}
-      {table && rows.some((r) => r.next) && (
-        <div className="grid grid-cols-1 gap-3">
-          {[...terminal, ...bairros].map((r) => (
-            <div key={r.origin} className="flex items-center justify-between rounded-xl bg-ink-950 px-4 py-3">
+
+      {loading && <div className="text-xs text-slate-400 py-2">Calculando próximas partidas…</div>}
+      {!loading && !table && (
+        <div className="text-xs text-slate-400 py-1">
+          Selecione Dias Úteis ou Sábado abaixo para consultar a grade.
+        </div>
+      )}
+
+      {table && rows.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {rows.map((r) => (
+            <div
+              key={r.origin}
+              className="bg-ink-950/90 border border-ink-800 rounded-xl p-3 flex items-center justify-between gap-2"
+            >
               <div className="min-w-0">
-                <div className="text-xs text-slate-400">Saindo de</div>
-                <div className="font-medium truncate">{r.origin}</div>
-                {r.next && (
-                  <div className="text-sm text-slate-400 mt-0.5">
-                    às <span className="num text-slate-200">{r.next.time}</span>
-                    {r.after && <> · depois <span className="num">{r.after.time}</span></>}
+                <div className="text-[11px] uppercase tracking-wide text-slate-400 truncate">
+                  Saída: <b className="text-slate-200">{r.origin}</b>
+                </div>
+                {r.next ? (
+                  <div className="mt-0.5 flex items-baseline gap-2">
+                    <span className="num text-2xl font-bold text-white">{r.next.time}</span>
+                    {r.after && (
+                      <span className="text-xs text-slate-400">depois {r.after.time}</span>
+                    )}
                   </div>
+                ) : (
+                  <div className="text-xs text-slate-500 mt-1">Sem horários</div>
                 )}
               </div>
-              <div className={`num text-4xl font-semibold ${r.minutesLeft !== undefined && r.minutesLeft <= 5 ? 'text-go' : 'text-warn'}`}>
-                {r.minutesLeft !== undefined ? formatCountdown(r.minutesLeft) : '—'}
-              </div>
+
+              {r.minutesLeft !== undefined && (
+                <div className="shrink-0 text-right">
+                  <div className="text-[10px] text-slate-400 uppercase">Daqui a</div>
+                  <div className="num text-base font-bold text-go bg-go-soft px-2.5 py-1 rounded-lg">
+                    {formatCountdown(r.minutesLeft)}
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </div>
       )}
-    </section>
+    </div>
   );
 }
 
-function Grid({ table, fromCache, origin, setOrigin, isToday }: { table: Timetable; fromCache: boolean; origin: string | null; setOrigin: (o: string) => void; isToday: boolean }) {
+function Grid({
+  table,
+  fromCache,
+  origin,
+  setOrigin,
+  isToday,
+  onlyUpcoming,
+  setOnlyUpcoming,
+}: {
+  table: Timetable;
+  fromCache: boolean;
+  origin: string | null;
+  setOrigin: (o: string) => void;
+  isToday: boolean;
+  onlyUpcoming: boolean;
+  setOnlyUpcoming: (fn: (prev: boolean) => boolean) => void;
+}) {
   const now = useNow(30000);
   const nowMin = minutesOfDay(now);
   const col = table.columns.find((c) => c.origin === origin) ?? table.columns[0];
 
   if (!col) {
     return (
-      <div className="rounded-xl bg-warn-soft border border-warn/40 p-3 text-sm space-y-2">
-        <div className="font-medium text-warn">Não consegui ler esta tabela automaticamente.</div>
-        <div className="text-slate-300">O layout da página pode ter mudado. Veja o conteúdo bruto na aba Diagnóstico.</div>
-        {table.rawText && <pre className="text-xs whitespace-pre-wrap max-h-48 overflow-auto text-slate-400">{table.rawText}</pre>}
+      <div className="text-xs text-slate-400 py-4">
+        Toque no botão "Original" acima para abrir a tabela diretamente no site da FAOL.
       </div>
     );
   }
 
   const nextMin = isToday ? col.departures.find((d) => d.minutes >= nowMin)?.minutes : undefined;
+
+  const filteredDeps =
+    isToday && onlyUpcoming
+      ? col.departures.filter((d) => d.minutes >= nowMin - 5)
+      : col.departures;
+
   const byHour = new Map<number, typeof col.departures>();
-  col.departures.forEach((d) => {
+  filteredDeps.forEach((d) => {
     const h = Math.floor(d.minutes / 60);
     byHour.set(h, [...(byHour.get(h) ?? []), d]);
   });
+
   const usedRamais = [...new Set(col.departures.map((d) => d.ramal).filter(Boolean))] as string[];
 
   return (
-    <div>
-      {fromCache && (
-        <div className="flex items-center gap-2 text-xs text-warn mb-2">
-          <WifiOff size={13} /> Cópia offline de {new Date(table.fetchedAt).toLocaleDateString('pt-BR')}
-        </div>
-      )}
+    <div className="space-y-3">
+      {/* Seletor de Ponto de Partida (Estação Livre vs Bairros/Sub-rotas) */}
       {table.columns.length > 1 && (
-        <div className="flex gap-2 mb-3 overflow-x-auto scroll-y">
-          {table.columns.map((c) => (
-            <button
-              key={c.origin}
-              onClick={() => setOrigin(c.origin)}
-              className={`shrink-0 h-9 px-3 rounded-lg text-sm border ${c.origin === col.origin ? 'bg-ink-600 border-route text-white' : 'bg-ink-800 border-ink-600 text-slate-300'}`}
-            >
-              {c.isTerminal ? '' : 'Saindo de '}{c.origin}
-            </button>
-          ))}
+        <div className="space-y-1">
+          <div className="text-[11px] text-slate-400 font-medium">Sentido / Ponto de Partida:</div>
+          <div className="flex flex-wrap gap-1.5">
+            {table.columns.map((c) => (
+              <button
+                key={c.origin}
+                onClick={() => setOrigin(c.origin)}
+                className={`h-9 px-3 rounded-xl text-xs font-semibold border transition ${
+                  c.origin === col.origin
+                    ? 'bg-ink-700 border-route text-white'
+                    : 'bg-ink-950 border-ink-700 text-slate-400'
+                }`}
+              >
+                {c.origin} ({c.departures.length})
+              </button>
+            ))}
+          </div>
         </div>
       )}
-      <div className="rounded-xl border border-ink-700 overflow-hidden">
+
+      {isToday && (
+        <div className="flex items-center justify-between text-xs pt-1">
+          <span className="text-slate-400">
+            {fromCache ? `Salvo offline` : `Sincronizado com a FAOL`}
+          </span>
+          <button
+            onClick={() => setOnlyUpcoming((prev) => !prev)}
+            className={`px-2.5 py-1 rounded-lg border font-medium ${
+              onlyUpcoming
+                ? 'bg-go-soft border-go/50 text-go'
+                : 'bg-ink-800 border-ink-600 text-slate-300'
+            }`}
+          >
+            {onlyUpcoming ? 'Mostrando só próximos' : 'Filtrar só próximos'}
+          </button>
+        </div>
+      )}
+
+      {/* Linhas por Faixa Horária */}
+      <div className="divide-y divide-ink-800 border border-ink-800 rounded-xl overflow-hidden">
         {[...byHour.entries()].map(([h, deps]) => (
-          <div key={h} className="flex items-start gap-3 px-3 py-2 border-b border-ink-800 last:border-0">
-            <div className="num text-xl text-slate-400 w-9 pt-0.5">{String(h).padStart(2, '0')}</div>
-            <div className="flex flex-wrap gap-2 flex-1">
+          <div key={h} className="flex items-center gap-2.5 px-3 py-2 bg-ink-950/60">
+            <div className="num w-9 text-sm font-bold text-route shrink-0">
+              {String(h).padStart(2, '0')}h
+            </div>
+            <div className="flex flex-wrap gap-1.5">
               {deps.map((d) => {
                 const past = isToday && d.minutes < nowMin;
                 const next = d.minutes === nextMin;
                 return (
                   <span
-                    key={d.time + (d.ramal ?? '')}
-                    className={`num text-lg px-2 rounded-md min-w-[40px] text-center ${next ? 'bg-go text-ink-950 font-bold' : past ? 'text-slate-600' : 'bg-ink-700 text-slate-100'}`}
+                    key={`${d.time}${d.ramal ?? ''}`}
+                    className={`num px-2.5 py-1 rounded-lg text-sm font-semibold flex items-center gap-1 ${
+                      next
+                        ? 'bg-go text-ink-950 font-bold ring-2 ring-go/50'
+                        : past
+                        ? 'bg-ink-900 text-slate-500'
+                        : 'bg-ink-800 text-slate-100'
+                    }`}
                   >
-                    {d.time.slice(3)}
-                    {d.ramal && <sup className="ml-0.5 text-[11px] font-bold" style={{ color: next ? '#04261c' : ramalColor(d.ramal) }}>{d.ramal}</sup>}
+                    {d.time}
+                    {d.ramal && (
+                      <b
+                        style={{ color: next ? '#04261c' : ramalColor(d.ramal) }}
+                        className="text-xs"
+                      >
+                        -{d.ramal}
+                      </b>
+                    )}
                   </span>
                 );
               })}
@@ -261,22 +443,19 @@ function Grid({ table, fromCache, origin, setOrigin, isToday }: { table: Timetab
           </div>
         ))}
       </div>
+
+      {/* Legenda de Ramais */}
       {(table.legend.length > 0 || usedRamais.length > 0) && (
-        <div className="mt-3 text-sm space-y-1">
-          <div className="text-xs text-slate-400">Ramais</div>
+        <div className="bg-ink-950 border border-ink-800 rounded-xl p-3 space-y-1">
+          <div className="text-[11px] font-bold uppercase text-slate-400">Legenda de Ramais</div>
           {table.legend.map((l) => (
-            <div key={l.code} className="text-slate-300">
-              <span className="num font-semibold text-route">{l.code}</span> {l.label}
+            <div key={l.code} className="text-xs text-slate-300 flex items-center gap-2">
+              <span className="font-bold text-route">{l.code}:</span>
+              <span>{l.label}</span>
             </div>
           ))}
         </div>
       )}
-      <div className="mt-2"><LineBadgeHidden code={table.code} /></div>
     </div>
   );
-}
-
-// mantém o import do LineBadge usado de forma discreta (mostra o código da tabela no rodapé)
-function LineBadgeHidden({ code }: { code: string }) {
-  return <div className="flex items-center gap-2 text-xs text-slate-500"><LineBadge code={code} size="sm" /> fonte: faol.com.br</div>;
 }

@@ -1,0 +1,14 @@
+{
+  "appId": "br.com.novafriburgo.onibus",
+  "appName": "Friburgo Bus",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "https",
+    "cleartext": true
+  },
+  "plugins": {
+    "CapacitorHttp": {
+      "enabled": true
+    }
+  }
+}

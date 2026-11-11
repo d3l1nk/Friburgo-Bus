@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: #0b1118;
+  color: #e6edf5;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  font-family: 'Barlow', system-ui, sans-serif;
+}
+
+body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+input,
+pre {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.pt-safe { padding-top: env(safe-area-inset-top, 0px); }
+.pb-safe { padding-bottom: env(safe-area-inset-bottom, 0px); }
+
+.scroll-y { overflow-y: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+.scroll-y::-webkit-scrollbar { display: none; }
+
+.num { font-family: 'Barlow Condensed', 'Barlow', sans-serif; font-variant-numeric: tabular-nums; letter-spacing: 0.01em; }
+
+/* Leaflet — tema escuro */
+.leaflet-container { background: #0b1118; font-family: 'Barlow', sans-serif; }
+.leaflet-control-attribution { background: rgba(11, 17, 24, 0.7) !important; color: #7d8fa3 !important; font-size: 9px !important; }
+.leaflet-control-attribution a { color: #9db2c9 !important; }
+.leaflet-control-zoom { display: none; }
+
+/* Marcadores */
+.stop-dot {
+  width: 14px; height: 14px; border-radius: 9999px;
+  background: #3b9cff; border: 2px solid #0b1118;
+  box-shadow: 0 0 0 1px #3b9cff;
+}
+.stop-dot.sel { background: #2dd4a0; box-shadow: 0 0 0 3px rgba(45, 212, 160, 0.35); width: 18px; height: 18px; }
+.bus-pin {
+  min-width: 28px; height: 22px; padding: 0 6px; border-radius: 6px;
+  background: #fbbf24; color: #1b1405; border: 2px solid #0b1118;
+  font: 700 13px/18px 'Barlow Condensed', sans-serif; text-align: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+.bus-pin.dim { background: #3a4a5c; color: #b5c3d3; }
+.bus-pin.hi { background: #2dd4a0; color: #04261c; transform: scale(1.2); }
+.me-dot {
+  width: 16px; height: 16px; border-radius: 9999px; background: #fff;
+  border: 4px solid #3b9cff; box-shadow: 0 0 0 6px rgba(59, 156, 255, 0.25);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

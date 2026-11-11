@@ -9,13 +9,16 @@ export function haversine(a: LatLng, b: LatLng): number {
   const dLat = rad(b.lat - a.lat);
   const dLng = rad(b.lng - a.lng);
   const x =
-    Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
   return 2 * R * Math.asin(Math.sqrt(x));
 }
 
 export function formatDistance(m?: number): string {
   if (m === undefined) return '';
-  return m < 1000 ? `${Math.round(m / 10) * 10} m` : `${(m / 1000).toFixed(1).replace('.', ',')} km`;
+  return m < 1000
+    ? `${Math.max(10, Math.round(m / 10) * 10)} m`
+    : `${(m / 1000).toFixed(1).replace('.', ',')} km`;
 }
 
 export interface GeoFix {
@@ -31,14 +34,32 @@ export async function getPosition(): Promise<GeoFix> {
         await Geolocation.requestPermissions();
       }
     } catch {
-      /* web: sem checkPermissions */
+      /* Navegador web sem checkPermissions nativo */
     }
-    const p = await Geolocation.getCurrentPosition({
-      enableHighAccuracy: true,
-      timeout: 12000,
-      maximumAge: 15000,
-    });
-    return { pos: { lat: p.coords.latitude, lng: p.coords.longitude }, usingFallback: false };
+
+    // 1) Tentativa rápida via rede/Wi-Fi (máx 3 segundos) para não travar a abertura do app
+    try {
+      const fast = await Geolocation.getCurrentPosition({
+        enableHighAccuracy: false,
+        timeout: 3000,
+        maximumAge: 60000,
+      });
+      return {
+        pos: { lat: fast.coords.latitude, lng: fast.coords.longitude },
+        usingFallback: false,
+      };
+    } catch {
+      // 2) Tentativa com GPS de alta precisão (máx 6 segundos)
+      const precise = await Geolocation.getCurrentPosition({
+        enableHighAccuracy: true,
+        timeout: 6000,
+        maximumAge: 30000,
+      });
+      return {
+        pos: { lat: precise.coords.latitude, lng: precise.coords.longitude },
+        usingFallback: false,
+      };
+    }
   } catch {
     return { pos: ESTACAO_LIVRE, usingFallback: true };
   }

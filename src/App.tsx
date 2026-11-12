@@ -28,8 +28,9 @@ export default function App() {
   const { alerts } = useAlerts();
   const veh = useVehicles(tab === 'radar' || tab === 'lines');
 
+  // 1ª posição rápida (rede, até 3 s); o GPS preciso chega depois via onRefine
   const relocate = useCallback(() => {
-    void getPosition().then(setGeo);
+    void getPosition((fix) => setGeo(fix)).then(setGeo);
   }, []);
   useEffect(relocate, [relocate]);
 

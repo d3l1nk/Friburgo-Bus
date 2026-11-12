@@ -1,25 +1,90 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { MapContainer, Marker, Popup, TileLayer, useMap } from 'react-leaflet';
+import { MapContainer, Marker, TileLayer, useMap } from 'react-leaflet';
 import L from 'leaflet';
-import {
-  ArrowLeft,
-  Bus,
-  ChevronDown,
-  ChevronUp,
-  Crosshair,
-  Layers,
-  MapPin,
-  RefreshCw,
-  Star,
-  WifiOff,
-  X,
-} from 'lucide-react';
+import { ArrowLeft, Bug, Bus, ChevronDown, ChevronUp, Crosshair, Layers, MapPin, RefreshCw, Star, WifiOff, X } from 'lucide-react';
 import { Empty, IconBtn, LineBadge } from './ui';
-import { ESTACAO_LIVRE, formatDistance, type GeoFix } from '../lib/geo';
+import { ESTACAO_LIVRE, formatDistance, haversine, type GeoFix } from '../lib/geo';
+import { getJSON, setJSON } from '../lib/storage';
 import { usePolling } from '../lib/time';
 import { findLine, resolveLineKey } from '../data/faolLines';
 import { getNearbyStops, getStopArrivals } from '../services/merusApi';
 import type { Favorites, MerusArrival, MerusStop, MerusVehicle } from '../types';
+
+// =====================================================================
+// Provedores de tiles (nenhum exige chave e todos funcionam no WebView Android)
+// =====================================================================
+type MapStyle = 'voyager' | 'dark' | 'satellite';
+
+const TILES: Record<MapStyle, { label: string; url: string; attribution: string; subdomains: string; maxZoom: number }> = {
+  voyager: {
+    label: 'Ruas',
+    url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
+    attribution: '&copy; OpenStreetMap &copy; CARTO',
+    subdomains: 'abcd',
+    maxZoom: 20,
+  },
+  dark: {
+    label: 'Escuro',
+    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+    attribution: '&copy; OpenStreetMap &copy; CARTO',
+    subdomains: 'abcd',
+    maxZoom: 20,
+  },
+  satellite: {
+    label: 'Satélite',
+    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    attribution: 'Tiles &copy; Esri',
+    subdomains: 'abc',
+    maxZoom: 19,
+  },
+};
+const STYLE_ORDER: MapStyle[] = ['voyager', 'dark', 'satellite'];
+const FALLBACK_NEXT: Record<MapStyle, MapStyle> = { voyager: 'dark', dark: 'satellite', satellite: 'voyager' };
+const STYLE_KEY = 'map:style:v1';
+
+// =====================================================================
+// Ícones (criados uma única vez)
+// =====================================================================
+const ICON_STOP = L.divIcon({ className: '', html: '<div class="stop-dot"></div>', iconSize: [14, 14], iconAnchor: [7, 7] });
+const ICON_STOP_SEL = L.divIcon({ className: '', html: '<div class="stop-dot sel"></div>', iconSize: [18, 18], iconAnchor: [9, 9] });
+const ICON_ME = L.divIcon({ className: '', html: '<div class="me-dot"></div>', iconSize: [16, 16], iconAnchor: [8, 8] });
+const busIcons = new Map<string, L.DivIcon>();
+function busIcon(code: string, mode: '' | 'dim' | 'hi'): L.DivIcon {
+  const k = `${mode}|${code}`;
+  let icon = busIcons.get(k);
+  if (!icon) {
+    icon = L.divIcon({ className: '', html: `<div class="bus-pin ${mode}">${code}</div>`, iconSize: [30, 22], iconAnchor: [15, 11] });
+    busIcons.set(k, icon);
+  }
+  return icon;
+}
+const busCode = (v: MerusVehicle) => findLine(v.lineKey)?.code ?? (v.lineLabel.match(/\d{1,3}[A-Za-z]?/)?.[0] ?? '?');
+
+type Target = { lat: number; lng: number; zoom?: number; n: number };
+
+function MapController({ active, target }: { active: boolean; target: Target | null }) {
+  const map = useMap();
+  useEffect(() => {
+    const c = map.getContainer();
+    const ro = new ResizeObserver(() => map.invalidateSize());
+    ro.observe(c);
+    if (c.parentElement) ro.observe(c.parentElement);
+    const t = setTimeout(() => map.invalidateSize(), 120);
+    return () => {
+      ro.disconnect();
+      clearTimeout(t);
+    };
+  }, [map]);
+  useEffect(() => {
+    if (!active) return;
+    const t = setTimeout(() => map.invalidateSize(), 60);
+    return () => clearTimeout(t);
+  }, [active, map]);
+  useEffect(() => {
+    if (target) map.flyTo([target.lat, target.lng], target.zoom ?? map.getZoom(), { duration: 0.6 });
+  }, [target, map]);
+  return null;
+}
 
 interface Props {
   active: boolean;
@@ -37,84 +102,10 @@ interface Props {
   onOpenDiag: () => void;
 }
 
-type MapStyleId = 'dark' | 'streets' | 'satellite';
-
-const MAP_STYLES: Record<MapStyleId, { label: string; url: string; subdomains?: string }> = {
-  dark: {
-    label: 'Escuro',
-    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    subdomains: 'abcd',
-  },
-  streets: {
-    label: 'Ruas',
-    url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-    subdomains: 'abcd',
-  },
-  satellite: {
-    label: 'Satélite',
-    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-  },
-};
-
-const stopIcon = (sel: boolean) =>
-  L.divIcon({
-    className: '',
-    html: `<div class="stop-dot ${sel ? 'sel' : ''}"></div>`,
-    iconSize: sel ? [18, 18] : [14, 14],
-    iconAnchor: sel ? [9, 9] : [7, 7],
-  });
-
-const meIcon = L.divIcon({
-  className: '',
-  html: '<div class="me-dot"></div>',
-  iconSize: [16, 16],
-  iconAnchor: [8, 8],
-});
-
-function busCode(v: MerusVehicle): string {
-  return findLine(v.lineKey)?.code ?? v.lineLabel.match(/\d{1,3}[A-Za-z]?/)?.[0] ?? '?';
-}
-
-function MapController({
-  active,
-  target,
-}: {
-  active: boolean;
-  target: { lat: number; lng: number; zoom?: number; n: number } | null;
-}) {
-  const map = useMap();
-
-  useEffect(() => {
-    const container = map.getContainer();
-    const ro = new ResizeObserver(() => {
-      map.invalidateSize({ animate: false });
-    });
-    ro.observe(container);
-    return () => ro.disconnect();
-  }, [map]);
-
-  useEffect(() => {
-    if (active) {
-      const id = setTimeout(() => map.invalidateSize(), 80);
-      return () => clearTimeout(id);
-    }
-  }, [active, map]);
-
-  useEffect(() => {
-    if (target) {
-      map.flyTo([target.lat, target.lng], target.zoom ?? map.getZoom(), { duration: 0.65 });
-    }
-  }, [target, map]);
-
-  return null;
-}
-
 export default function RadarTab(p: Props) {
   const pos = p.geo?.pos ?? ESTACAO_LIVRE;
-  const [mapStyle, setMapStyle] = useState<MapStyleId>('streets');
-  const [sheetMode, setSheetMode] = useState<'stops' | 'buses'>('stops');
   const [stops, setStops] = useState<MerusStop[]>([]);
-  const [stopsInfo, setStopsInfo] = useState<{ fromCache: boolean; savedAt: number } | null>(null);
+  const [stopsInfo, setStopsInfo] = useState<{ fromCache: boolean } | null>(null);
   const [loadingStops, setLoadingStops] = useState(false);
   const [stopsErr, setStopsErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<MerusStop | null>(null);
@@ -122,13 +113,34 @@ export default function RadarTab(p: Props) {
   const [arrErr, setArrErr] = useState<string | null>(null);
   const [arrLoading, setArrLoading] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const [target, setTarget] = useState<{ lat: number; lng: number; zoom?: number; n: number } | null>(null);
-  const tileErrors = useRef(0);
+  const [sheetTab, setSheetTab] = useState<'stops' | 'live'>('stops');
+  const [target, setTarget] = useState<Target | null>(null);
 
-  const cycleMapStyle = () => {
-    setMapStyle((prev) =>
-      prev === 'streets' ? 'dark' : prev === 'dark' ? 'satellite' : 'streets',
-    );
+  // mapa: estilo + fallback automático
+  const [style, setStyle] = useState<MapStyle>('voyager');
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [toast, setToast] = useState<string | null>(null);
+  const tileErr = useRef({ count: 0, switches: 0 });
+  useEffect(() => {
+    getJSON<MapStyle>(STYLE_KEY).then((s) => s && TILES[s] && setStyle(s));
+  }, []);
+  const pickStyle = (s: MapStyle) => {
+    tileErr.current = { count: 0, switches: 0 };
+    setStyle(s);
+    setMenuOpen(false);
+    void setJSON(STYLE_KEY, s);
+  };
+  const onTileError = () => {
+    const e = tileErr.current;
+    e.count++;
+    if (e.count >= 4 && e.switches < 3) {
+      e.count = 0;
+      e.switches++;
+      const next = FALLBACK_NEXT[style];
+      setToast(`O mapa "${TILES[style].label}" não carregou. Usando "${TILES[next].label}".`);
+      setStyle(next);
+      setTimeout(() => setToast(null), 4500);
+    }
   };
 
   const loadStops = async (force: boolean) => {
@@ -137,7 +149,7 @@ export default function RadarTab(p: Props) {
     try {
       const r = await getNearbyStops(pos, force);
       setStops(r.stops);
-      setStopsInfo({ fromCache: r.fromCache, savedAt: r.savedAt });
+      setStopsInfo({ fromCache: r.fromCache });
     } catch (e: any) {
       setStopsErr(e?.message ?? 'Falha ao carregar pontos');
     } finally {
@@ -145,8 +157,14 @@ export default function RadarTab(p: Props) {
     }
   };
 
+  const centered = useRef(false);
   useEffect(() => {
-    if (p.geo) void loadStops(false);
+    if (!p.geo) return;
+    void loadStops(false);
+    if (!centered.current) {
+      centered.current = true;
+      setTarget({ lat: p.geo.pos.lat, lng: p.geo.pos.lng, zoom: 16, n: Date.now() });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [p.geo?.pos.lat, p.geo?.pos.lng]);
 
@@ -163,6 +181,7 @@ export default function RadarTab(p: Props) {
     setArrivals([]);
     setArrErr(null);
     setArrLoading(true);
+    setSheetTab('stops');
     setExpanded(true);
     setTarget({ lat: s.lat, lng: s.lng, zoom: 17, n: Date.now() });
   };
@@ -178,153 +197,162 @@ export default function RadarTab(p: Props) {
       setArrLoading(false);
     }
   };
-
   usePolling(loadArrivals, 15000, p.active && !!selected, [selected?.id]);
 
-  const busIcons = useMemo(
+  // marcadores memoizados: selecionar um ponto não recria todos os ícones
+  const stopMarkers = useMemo(
     () =>
-      p.vehicles.map((v) => {
-        const hi = p.highlight && v.lineKey === p.highlight;
-        const dim = p.highlight && !hi;
-        const code = busCode(v);
-        return {
-          v,
-          icon: L.divIcon({
-            className: '',
-            html: `<div class="bus-pin ${hi ? 'hi' : ''} ${dim ? 'dim' : ''}">${code}</div>`,
-            iconSize: [34, 24],
-            iconAnchor: [17, 12],
-          }),
-        };
+      stops.map((s) => (
+        <Marker key={s.id} position={[s.lat, s.lng]} icon={selected?.id === s.id ? ICON_STOP_SEL : ICON_STOP} eventHandlers={{ click: () => selectStop(s) }} />
+      )),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [stops, selected?.id],
+  );
+  const busMarkers = useMemo(
+    () =>
+      p.vehicles.map((v, i) => {
+        const mode = p.highlight ? (v.lineKey === p.highlight ? 'hi' : 'dim') : '';
+        return <Marker key={`${v.id}-${i}`} position={[v.lat, v.lng]} icon={busIcon(busCode(v), mode)} zIndexOffset={mode === 'hi' ? 900 : 500} />;
       }),
     [p.vehicles, p.highlight],
   );
 
+  const groups = useMemo(() => {
+    const m = new Map<string, MerusVehicle[]>();
+    p.vehicles.forEach((v) => m.set(v.lineKey || '?', [...(m.get(v.lineKey || '?') ?? []), v]));
+    return [...m.entries()]
+      .map(([key, vs]) => ({ key, vs, line: findLine(key) }))
+      .sort((a, b) => b.vs.length - a.vs.length || a.key.localeCompare(b.key, undefined, { numeric: true }));
+  }, [p.vehicles]);
+
+  const pickGroup = (key: string, vs: MerusVehicle[]) => {
+    if (p.highlight === key) return p.setHighlight(null);
+    p.setHighlight(key);
+    const nearest = [...vs].sort((a, b) => haversine(pos, a) - haversine(pos, b))[0];
+    if (nearest) setTarget({ lat: nearest.lat, lng: nearest.lng, zoom: 16, n: Date.now() });
+    setExpanded(false);
+  };
+
   const isFav = (id: string) => p.favs.stops.some((s) => s.id === id);
   const highlightLine = p.highlight ? findLine(p.highlight) : undefined;
-  const sheetH = expanded ? '62%' : selected ? '44%' : '36%';
-  const styleCfg = MAP_STYLES[mapStyle];
+  const fresh = p.vehiclesAt > 0 && !p.vehiclesError;
+  const t = TILES[style];
 
   return (
-    <div className="relative flex-1 flex flex-col overflow-hidden bg-ink-950">
-      {/* Área do Mapa com posicionamento garantido */}
-      <div className="relative flex-1 w-full min-h-[240px]">
-        <MapContainer
-          center={[pos.lat, pos.lng]}
-          zoom={15}
-          zoomControl={false}
-          className="absolute inset-0 w-full h-full z-0"
-          style={{ width: '100%', height: '100%' }}
-        >
-          <TileLayer
-            key={mapStyle}
-            url={styleCfg.url}
-            subdomains={styleCfg.subdomains ?? 'abc'}
-            maxZoom={19}
-            eventHandlers={{
-              tileerror: () => {
-                tileErrors.current += 1;
-                if (tileErrors.current > 6 && mapStyle === 'dark') {
-                  setMapStyle('streets');
-                }
-              },
-            }}
-          />
-          <MapController active={p.active} target={target} />
+    <div className="relative h-full w-full overflow-hidden">
+      <MapContainer
+        center={[pos.lat, pos.lng]}
+        zoom={16}
+        zoomControl={false}
+        attributionControl
+        className="absolute inset-0 w-full h-full isolate"
+      >
+        <TileLayer
+          key={style}
+          url={t.url}
+          attribution={t.attribution}
+          subdomains={t.subdomains}
+          maxZoom={t.maxZoom}
+          eventHandlers={{ tileerror: onTileError }}
+        />
+        <MapController active={p.active} target={target} />
+        <Marker position={[pos.lat, pos.lng]} icon={ICON_ME} interactive={false} />
+        {stopMarkers}
+        {busMarkers}
+      </MapContainer>
 
-          <Marker position={[pos.lat, pos.lng]} icon={meIcon} />
-
-          {stops.map((s) => (
-            <Marker
-              key={s.id}
-              position={[s.lat, s.lng]}
-              icon={stopIcon(selected?.id === s.id)}
-              eventHandlers={{ click: () => selectStop(s) }}
-            />
-          ))}
-
-          {busIcons.map(({ v, icon }) => (
-            <Marker key={v.id} position={[v.lat, v.lng]} icon={icon}>
-              <Popup>
-                <div className="text-slate-900 text-xs space-y-1 min-w-[150px]">
-                  <div className="font-bold text-sm">
-                    Linha {busCode(v)} · {findLine(v.lineKey)?.name ?? v.lineName}
-                  </div>
-                  {v.direction && <div>Sentido: {v.direction}</div>}
-                  <div>Prefixo: {v.id}</div>
-                </div>
-              </Popup>
-            </Marker>
-          ))}
-        </MapContainer>
-
-        {/* HUD Superior Flutuante (Glassmorphism) */}
-        <div className="absolute top-3 left-3 right-3 z-[400] flex flex-col gap-2 pointer-events-none">
-          <div className="flex items-center justify-between gap-2">
-            <div className="pointer-events-auto flex items-center gap-2.5 bg-ink-900/90 backdrop-blur-md border border-ink-600/80 rounded-2xl px-3.5 py-2 shadow-lg">
-              <span className="h-2.5 w-2.5 rounded-full bg-go animate-pulse" />
-              <div>
-                <div className="text-xs font-semibold text-white leading-tight">Friburgo Bus</div>
-                <div className="text-[11px] text-slate-300 leading-tight">
-                  {p.vehicles.length} ônibus no GPS · {stops.length} paradas
-                </div>
+      {/* HUD flutuante */}
+      <div className="absolute inset-x-0 top-0 z-[1000] px-3 pointer-events-none" style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 12px)' }}>
+        <div className="glass pointer-events-auto flex items-center gap-1 rounded-2xl h-14 pl-4 pr-1 shadow-lg shadow-black/30">
+          <div className="flex items-center gap-4 flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="relative grid place-items-center">
+                <Bus size={20} className={fresh ? 'text-go' : 'text-slate-500'} />
+                {fresh && <span className="absolute -top-0.5 -right-1 h-2 w-2 rounded-full bg-go animate-pulse" />}
+              </span>
+              <div className="leading-none">
+                <div className="num text-2xl font-semibold">{p.vehicles.length}</div>
+                <div className="text-[10px] uppercase tracking-wide text-slate-400 mt-0.5">no GPS</div>
               </div>
             </div>
-
-            <div className="pointer-events-auto flex items-center gap-2">
-              <button
-                onClick={cycleMapStyle}
-                className="h-10 px-3 rounded-2xl bg-ink-900/90 backdrop-blur-md border border-ink-600/80 flex items-center gap-1.5 text-xs font-medium text-slate-200 shadow-lg active:scale-95 transition"
-              >
-                <Layers className="w-4 h-4 text-route" />
-                {styleCfg.label}
-              </button>
-
-              <button
-                onClick={() => {
-                  p.onRelocate();
-                  setTarget({ lat: pos.lat, lng: pos.lng, zoom: 16, n: Date.now() });
-                }}
-                aria-label="Minha localização"
-                className="h-10 w-10 rounded-2xl bg-ink-900/90 backdrop-blur-md border border-ink-600/80 grid place-items-center text-route shadow-lg active:scale-95 transition"
-              >
-                <Crosshair className="w-5 h-5" />
-              </button>
+            <div className="flex items-center gap-2">
+              <MapPin size={20} className="text-route" />
+              <div className="leading-none">
+                <div className="num text-2xl font-semibold">{stops.length}</div>
+                <div className="text-[10px] uppercase tracking-wide text-slate-400 mt-0.5">paradas</div>
+              </div>
             </div>
           </div>
+          <IconBtn onClick={() => setMenuOpen((o) => !o)} label="Estilo do mapa" active={menuOpen}><Layers size={20} /></IconBtn>
+          <IconBtn
+            onClick={() => {
+              p.onRelocate();
+              setTarget({ lat: pos.lat, lng: pos.lng, zoom: 16, n: Date.now() });
+            }}
+            label="Minha localização"
+          >
+            <Crosshair size={20} />
+          </IconBtn>
+          <IconBtn onClick={p.onOpenDiag} label="Inspecionar JSON"><Bug size={19} /></IconBtn>
+        </div>
 
+        {menuOpen && (
+          <div className="glass pointer-events-auto mt-2 ml-auto w-40 rounded-xl p-1 shadow-lg shadow-black/30">
+            {STYLE_ORDER.map((s) => (
+              <button
+                key={s}
+                onClick={() => pickStyle(s)}
+                className={`w-full text-left h-10 px-3 rounded-lg text-sm font-medium ${style === s ? 'bg-route text-ink-950' : 'text-slate-200 active:bg-ink-700'}`}
+              >
+                {TILES[s].label}
+              </button>
+            ))}
+          </div>
+        )}
+
+        <div className="mt-2 flex flex-col items-start gap-2">
           {p.geo?.usingFallback && (
-            <div className="pointer-events-auto self-start flex items-center gap-1.5 bg-warn-soft/95 border border-warn/40 text-warn text-xs px-3 py-1.5 rounded-xl shadow">
-              <WifiOff className="w-3.5 h-3.5 shrink-0" />
-              GPS desativado · Centro na Estação Livre
-            </div>
+            <div className="pointer-events-auto glass text-warn text-xs rounded-lg px-3 py-1.5">GPS indisponível. Usando a Estação Livre como referência.</div>
           )}
-
           {highlightLine && (
-            <button
-              onClick={() => p.setHighlight(null)}
-              className="pointer-events-auto self-start flex items-center gap-2 bg-go-soft/95 border border-go/60 text-go rounded-full pl-3 pr-2.5 py-1 text-xs font-semibold shadow-lg"
-            >
-              Filtrando linha {highlightLine.code} ({highlightLine.name})
-              <X className="w-3.5 h-3.5" />
+            <button onClick={() => p.setHighlight(null)} className="pointer-events-auto glass flex items-center gap-2 text-go rounded-full pl-3 pr-2 py-1 text-sm font-medium">
+              Destacando linha {highlightLine.code} <X size={16} />
             </button>
           )}
+          {toast && <div className="pointer-events-auto glass text-slate-100 text-xs rounded-lg px-3 py-1.5">{toast}</div>}
         </div>
       </div>
 
-      {/* Painel Inferior Deslizante (Bottom Sheet) */}
+      {/* Bottom sheet */}
       <div
-        style={{ height: sheetH }}
-        className="bg-ink-900 border-t border-ink-700 rounded-t-3xl flex flex-col transition-all duration-200 shadow-2xl z-20"
+        className="glass-strong absolute inset-x-0 bottom-0 z-[1000] rounded-t-3xl flex flex-col transition-[height] duration-200"
+        style={{ height: expanded ? '70%' : '36%' }}
       >
-        <button
-          onClick={() => setExpanded((e) => !e)}
-          className="h-7 w-full flex flex-col items-center justify-center text-slate-400 shrink-0"
-          aria-label="Expandir painel"
-        >
-          <div className="w-10 h-1 rounded-full bg-ink-600 mb-0.5" />
-          {expanded ? <ChevronDown className="w-4 h-4" /> : <ChevronUp className="w-4 h-4" />}
+        <button onClick={() => setExpanded((e) => !e)} className="h-7 grid place-items-center text-slate-500 shrink-0" aria-label="Expandir painel">
+          {expanded ? <ChevronDown size={20} /> : <ChevronUp size={20} />}
         </button>
+
+        {!selected && (
+          <div className="px-4 pb-2 shrink-0">
+            <div className="grid grid-cols-2 gap-1 p-1 rounded-xl bg-ink-950/70">
+              {(
+                [
+                  ['stops', `Paradas próximas`, stops.length],
+                  ['live', `Ônibus ao vivo`, p.vehicles.length],
+                ] as const
+              ).map(([id, label, n]) => (
+                <button
+                  key={id}
+                  onClick={() => setSheetTab(id)}
+                  className={`h-10 rounded-lg text-sm font-semibold flex items-center justify-center gap-2 ${sheetTab === id ? 'bg-ink-600 text-white' : 'text-slate-400'}`}
+                >
+                  {label}
+                  <span className={`num text-sm px-1.5 rounded ${sheetTab === id ? 'bg-route text-ink-950' : 'bg-ink-700'}`}>{n}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {selected ? (
           <ArrivalBoard
@@ -341,118 +369,71 @@ export default function RadarTab(p: Props) {
             onRefresh={loadArrivals}
             onPickLine={(k) => p.setHighlight(k)}
           />
-        ) : (
-          <div className="flex-1 flex flex-col overflow-hidden px-3 pb-2">
-            {/* Abas do Painel Inferior: Pontos vs Ônibus Ativos */}
-            <div className="flex items-center justify-between gap-2 pb-2 border-b border-ink-800">
-              <div className="flex bg-ink-950 p-1 rounded-xl border border-ink-800">
-                <button
-                  onClick={() => setSheetMode('stops')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                    sheetMode === 'stops' ? 'bg-route text-ink-950' : 'text-slate-400'
-                  }`}
-                >
-                  Paradas ({stops.length})
-                </button>
-                <button
-                  onClick={() => setSheetMode('buses')}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                    sheetMode === 'buses' ? 'bg-route text-ink-950' : 'text-slate-400'
-                  }`}
-                >
-                  Ônibus ao vivo ({p.vehicles.length})
-                </button>
-              </div>
-
+        ) : sheetTab === 'stops' ? (
+          <div className="flex flex-col flex-1 min-h-0">
+            <div className="flex items-center justify-between px-4 pb-2 shrink-0 text-xs text-slate-400">
+              <span className="flex items-center gap-1">
+                Ordenadas por distância
+                {stopsInfo?.fromCache && (
+                  <span className="inline-flex items-center gap-1 text-warn ml-2">
+                    <WifiOff size={11} /> cópia local
+                  </span>
+                )}
+              </span>
               <button
                 onClick={() => loadStops(true)}
                 disabled={loadingStops}
-                className="flex items-center gap-1.5 h-8 px-3 rounded-xl bg-ink-800 border border-ink-600 text-xs font-medium text-slate-200 active:bg-ink-700 disabled:opacity-50"
+                className="flex items-center gap-2 h-9 px-3 rounded-full bg-ink-700 text-sm font-medium text-slate-100 active:bg-ink-600 disabled:opacity-60"
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${loadingStops ? 'animate-spin' : ''}`} />
-                Atualizar
+                <RefreshCw size={15} className={loadingStops ? 'animate-spin' : ''} />
+                Atualizar pontos
               </button>
             </div>
-
-            {stopsErr && <div className="text-xs text-halt py-2">{stopsErr}</div>}
-
-            <div className="flex-1 scroll-y divide-y divide-ink-800/80">
-              {sheetMode === 'stops' ? (
-                <>
-                  {!stopsErr && !stops.length && !loadingStops && (
-                    <Empty
-                      icon={<MapPin className="w-8 h-8 text-slate-500" />}
-                      title="Nenhum ponto por perto"
-                      hint="Toque em Atualizar ou mova o mapa."
-                    />
-                  )}
-                  {stops.slice(0, 60).map((s) => (
-                    <button
-                      key={s.id}
-                      onClick={() => selectStop(s)}
-                      className="w-full text-left flex items-center gap-3 py-3 px-1 active:bg-ink-800/60 transition"
-                    >
-                      <div className="h-10 w-10 rounded-xl bg-route/15 border border-route/30 grid place-items-center text-route shrink-0">
-                        <MapPin className="w-5 h-5" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="font-medium text-sm text-white truncate">{s.name}</div>
-                        <div className="text-xs text-slate-400 flex items-center gap-2 mt-0.5">
-                          <span className="text-go font-semibold">{formatDistance(s.distance)}</span>
-                          {s.lines.length > 0 && (
-                            <span className="truncate">
-                              · Linhas:{' '}
-                              {s.lines
-                                .slice(0, 6)
-                                .map((l) => findLine(resolveLineKey(l))?.code ?? l)
-                                .join(', ')}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      {isFav(s.id) && <Star className="w-4 h-4 text-warn fill-warn shrink-0" />}
-                    </button>
-                  ))}
-                </>
-              ) : (
-                <>
-                  {!p.vehicles.length && (
-                    <Empty
-                      icon={<Bus className="w-8 h-8 text-slate-500" />}
-                      title="Nenhum veículo retornado no momento"
-                      hint="Aguarde a atualização automática de 15s."
-                    />
-                  )}
-                  {p.vehicles.map((v) => {
-                    const code = busCode(v);
-                    const line = findLine(v.lineKey);
-                    return (
-                      <button
-                        key={v.id}
-                        onClick={() => {
-                          p.setHighlight(v.lineKey || null);
-                          setTarget({ lat: v.lat, lng: v.lng, zoom: 16, n: Date.now() });
-                        }}
-                        className="w-full text-left flex items-center gap-3 py-2.5 px-1 active:bg-ink-800/60"
-                      >
-                        <LineBadge code={code} size="sm" />
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm font-medium text-white truncate">
-                            {line?.name ?? (v.lineName || v.lineLabel || 'Em trânsito')}
-                          </div>
-                          <div className="text-xs text-slate-400 truncate">
-                            Carro {v.id} {v.direction ? `· ${v.direction}` : ''}
-                          </div>
-                        </div>
-                        <span className="text-xs font-semibold text-go bg-go-soft px-2.5 py-1 rounded-lg">
-                          Localizar
-                        </span>
-                      </button>
-                    );
-                  })}
-                </>
+            <div className="scroll-y flex-1 px-3 pb-3">
+              {stopsErr && <div className="text-halt text-sm px-1 py-2">{stopsErr}</div>}
+              {!stopsErr && !stops.length && !loadingStops && (
+                <Empty icon={<MapPin size={28} />} title="Nenhum ponto por perto" hint="Toque em Atualizar pontos ou confira a aba Diagnóstico." />
               )}
+              {stops.slice(0, 60).map((s) => (
+                <button key={s.id} onClick={() => selectStop(s)} className="w-full text-left flex items-center gap-3 px-2 py-3 border-b border-white/5 active:bg-ink-800/70">
+                  <div className="num text-lg text-route w-14 shrink-0">{formatDistance(s.distance)}</div>
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium truncate">{s.name}</div>
+                    {s.lines.length > 0 && (
+                      <div className="text-xs text-slate-400 truncate">{s.lines.slice(0, 8).map((l) => findLine(resolveLineKey(l))?.code ?? l).join('  ')}</div>
+                    )}
+                  </div>
+                  {isFav(s.id) && <Star size={16} className="text-warn fill-warn" />}
+                </button>
+              ))}
             </div>
+          </div>
+        ) : (
+          <div className="scroll-y flex-1 px-3 pb-3">
+            {p.vehiclesError && <div className="text-halt text-sm px-1 py-2">{p.vehiclesError}</div>}
+            {!p.vehicles.length && !p.vehiclesError && <Empty icon={<Bus size={28} />} title="Nenhum ônibus com GPS agora" hint="A lista atualiza a cada 15 segundos." />}
+            {groups.map(({ key, vs, line }) => {
+              const dirs = [...new Set(vs.map((v) => v.direction).filter(Boolean))].slice(0, 2).join(' · ');
+              const near = Math.min(...vs.map((v) => haversine(pos, v)));
+              const on = p.highlight === key;
+              return (
+                <button
+                  key={key}
+                  onClick={() => pickGroup(key, vs)}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 mb-2 rounded-xl border text-left ${on ? 'bg-go-soft border-go/60' : 'bg-ink-800/70 border-white/5'}`}
+                >
+                  <LineBadge code={line?.code ?? key} />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium truncate">{line?.name ?? 'Linha não identificada'}</div>
+                    <div className="text-xs text-slate-400 truncate">{dirs || `mais próximo: ${formatDistance(near)}`}</div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div className="num text-2xl leading-none text-go">{vs.length}</div>
+                    <div className="text-[10px] text-slate-400 uppercase">{vs.length === 1 ? 'ônibus' : 'ônibus'}</div>
+                  </div>
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
@@ -473,68 +454,41 @@ function ArrivalBoard(props: {
 }) {
   const { stop, arrivals } = props;
   return (
-    <div className="flex-1 flex flex-col overflow-hidden px-3 pb-2">
-      <div className="flex items-center gap-2 pb-2.5 border-b border-ink-800">
-        <IconBtn onClick={props.onBack} label="Voltar">
-          <ArrowLeft className="w-5 h-5" />
-        </IconBtn>
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="flex items-center gap-1 px-2 pb-2 shrink-0">
+        <IconBtn onClick={props.onBack} label="Voltar"><ArrowLeft size={20} /></IconBtn>
         <div className="flex-1 min-w-0">
-          <div className="font-semibold text-sm text-white truncate">{stop.name}</div>
-          <div className="text-[11px] text-go flex items-center gap-1.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-go animate-pulse" />
-            Previsão no ponto · atualiza a cada 15 s
-          </div>
+          <div className="font-sign text-xl font-semibold leading-tight truncate">{stop.name}</div>
+          <div className="text-xs text-slate-400">Atualiza a cada 15 s</div>
         </div>
         <IconBtn onClick={props.onFav} label="Favoritar ponto" active={props.fav}>
-          <Star className={`w-5 h-5 ${props.fav ? 'fill-warn text-warn' : ''}`} />
+          <Star size={20} className={props.fav ? 'fill-warn text-warn' : ''} />
         </IconBtn>
-        <IconBtn onClick={props.onRefresh} label="Atualizar">
-          <RefreshCw className={`w-4 h-4 ${props.loading ? 'animate-spin' : ''}`} />
-        </IconBtn>
+        <IconBtn onClick={props.onRefresh} label="Atualizar"><RefreshCw size={18} className={props.loading ? 'animate-spin' : ''} /></IconBtn>
       </div>
-
-      {props.error && <div className="text-xs text-halt py-2">{props.error}</div>}
-
-      <div className="flex-1 scroll-y divide-y divide-ink-800">
-        {!props.loading && !props.error && !arrivals.length && (
-          <Empty
-            icon={<Bus className="w-8 h-8 text-slate-500" />}
-            title="Nenhum ônibus aproximando-se agora"
-            hint="Consulte a aba Linhas para ver a tabela completa de saídas da FAOL."
-          />
+      <div className="scroll-y flex-1 px-3 pb-3">
+        {props.error && <div className="text-halt text-sm px-1 py-2">{props.error}</div>}
+        {!props.loading && !props.error && !arrivals.length && <Empty icon={<MapPin size={28} />} title="Nenhum ônibus a caminho" hint="Quando houver previsão, ela aparece aqui." />}
+        {arrivals.length > 0 && (
+          <div className="rounded-2xl overflow-hidden border border-white/10 bg-ink-950/80">
+            {arrivals.map((a) => {
+              const code = findLine(a.lineKey)?.code ?? a.lineLabel.slice(0, 4);
+              const soon = a.etaMin !== null && a.etaMin <= 2;
+              return (
+                <button key={a.key} onClick={() => a.lineKey && props.onPickLine(a.lineKey)} className="w-full flex items-center gap-3 px-3 py-3 border-b border-white/5 last:border-0 text-left">
+                  <LineBadge code={code} />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-medium truncate">{a.destination || findLine(a.lineKey)?.name || a.lineLabel}</div>
+                    {a.prefix && <div className="text-xs text-slate-500">Veículo {a.prefix}</div>}
+                  </div>
+                  <div className={`num text-3xl font-semibold text-right ${soon ? 'text-go' : 'text-warn'}`}>
+                    {a.etaMin === null ? a.etaText || '—' : a.etaMin <= 0 ? 'Agora' : `${a.etaMin} min`}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         )}
-        {arrivals.map((a) => {
-          const code = findLine(a.lineKey)?.code ?? a.lineLabel.slice(0, 4);
-          const soon = a.etaMin !== null && a.etaMin <= 3;
-          return (
-            <button
-              key={a.key}
-              onClick={() => a.lineKey && props.onPickLine(a.lineKey)}
-              className="w-full flex items-center gap-3 py-3 px-1 text-left active:bg-ink-800/60"
-            >
-              <LineBadge code={code} />
-              <div className="flex-1 min-w-0">
-                <div className="font-medium text-sm text-white truncate">
-                  {a.destination || findLine(a.lineKey)?.name || a.lineLabel}
-                </div>
-                {a.prefix && <div className="text-xs text-slate-400">Veículo {a.prefix}</div>}
-              </div>
-              <div
-                className={`num px-3 py-1.5 rounded-xl font-bold text-sm ${
-                  soon
-                    ? 'bg-go text-ink-950 animate-pulse'
-                    : 'bg-ink-800 text-route border border-ink-700'
-                }`}
-              >
-                {a.etaMin === null
-                  ? a.etaText || '—'
-                  : a.etaMin <= 0
-                  ? 'Chegando'
-                  : `${a.etaMin} min`}
-              </div>
-            </button>
-          );
-        })}
       </div>
     </div>
   );

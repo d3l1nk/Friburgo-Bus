@@ -1,32 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  ArrowLeft,
-  Bus,
-  Clock,
-  Download,
-  ExternalLink,
-  MapPinned,
-  RefreshCw,
-  Star,
-} from 'lucide-react';
-import { AlertBanner, Header, IconBtn, LineBadge } from './ui';
-import { DAY_LABEL, dayTypeOf, formatCountdown, minutesOfDay, useNow } from '../lib/time';
-import { REGION_LABEL } from '../data/faolLines';
-import {
-  daysForLine,
-  downloadAllDays,
-  faolTableUrl,
-  getTimetable,
-  nextByColumn,
-} from '../services/faolScraper';
-import type {
-  DayCode,
-  FaolAlert,
-  FaolLine,
-  MerusVehicle,
-  Timetable,
-  TimetableResult,
-} from '../types';
+import { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import { ArrowLeft, Bus, Check, Download, ExternalLink, Info, MapPinned, RefreshCw, Star, WifiOff } from 'lucide-react';
+import { AlertBanner, Header, IconBtn } from './ui';
+import { DAY_LABEL, dayTypeOf, etaParts, minutesOfDay, useNow } from '../lib/time';
+import { openExternal } from '../lib/openUrl';
+import { CIRCULAR_MAIN, CIRCULAR_NOTE, REGION_LABEL, dayReplacement } from '../data/faolLines';
+import { daysForLine, downloadAllDays, faolTableUrl, getTableUrl, getTimetable, nextByColumn, type NextByColumn } from '../services/faolScraper';
+import type { DayCode, FaolAlert, FaolLine, MerusVehicle, Timetable, TimetableResult } from '../types';
 
 interface Props {
   line: FaolLine;
@@ -37,26 +16,27 @@ interface Props {
   onBack: () => void;
   onShowOnMap: () => void;
   onCacheChanged: () => void;
+  onOpenLine: (code: string) => void;
 }
 
 const RAMAL_COLORS = ['#3b9cff', '#2dd4a0', '#fbbf24', '#f472b6', '#a78bfa', '#fb923c'];
-const ramalColor = (r?: string) =>
-  r ? RAMAL_COLORS[(r.charCodeAt(0) - 65 + RAMAL_COLORS.length * 4) % RAMAL_COLORS.length] : undefined;
+const ramalColor = (r?: string) => (r ? RAMAL_COLORS[(r.charCodeAt(0) - 65 + RAMAL_COLORS.length * 4) % RAMAL_COLORS.length] : undefined);
 
-type Loaded = Partial<Record<DayCode, TimetableResult | 'loading'>>;
+type Loaded = Record<string, TimetableResult | 'loading'>;
 
 export default function LineDetail(p: Props) {
   const today = dayTypeOf();
   const days = daysForLine(p.line.code);
-  const [day, setDay] = useState<DayCode>(days.includes(today) ? today : days[0]);
+  const [day, setDay] = useState<DayCode>(today);
   const [tables, setTables] = useState<Loaded>({});
   const [origin, setOrigin] = useState<string | null>(null);
-  const [onlyUpcoming, setOnlyUpcoming] = useState(false);
+  const [onlyUpcoming, setOnlyUpcoming] = useState(true);
   const [downloading, setDownloading] = useState(false);
   const [dlMsg, setDlMsg] = useState<string | null>(null);
 
   const load = useCallback(
     async (d: DayCode, force = false) => {
+      if (dayReplacement(p.line.code, d)) return; // sem tabela própria
       setTables((t) => ({ ...t, [d]: 'loading' }));
       const r = await getTimetable(p.line.code, d, force);
       setTables((t) => ({ ...t, [d]: r }));
@@ -70,7 +50,6 @@ export default function LineDetail(p: Props) {
     if (!tables[today]) void load(today);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [today]);
-
   useEffect(() => {
     if (!tables[day]) void load(day);
     setOrigin(null);
@@ -81,148 +60,100 @@ export default function LineDetail(p: Props) {
   const viewRes = tables[day];
   const todayTable = todayRes && todayRes !== 'loading' ? todayRes.table : null;
   const viewTable = viewRes && viewRes !== 'loading' ? viewRes.table : null;
+  const replacement = dayReplacement(p.line.code, day);
+  const todayReplacement = dayReplacement(p.line.code, today);
+
+  const openOriginal = async () => {
+    const url = viewTable?.sourceUrl ?? (await getTableUrl(p.line.code, day).catch(() => faolTableUrl(p.line.code, day)));
+    void openExternal(url);
+  };
 
   const download = async () => {
     setDownloading(true);
     setDlMsg(null);
     const r = await downloadAllDays(p.line.code);
-    setDlMsg(`${r.ok} de ${r.total} tabelas salvas no aparelho para uso offline.`);
+    setDlMsg(`${r.ok} de ${r.total} tabelas baixadas para uso offline.`);
     for (const d of days) await load(d);
     setDownloading(false);
   };
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden bg-ink-950">
+    <div className="flex flex-col h-full">
       <Header
-        title={`${p.line.code} · ${p.line.name}`}
-        sub={`Região ${REGION_LABEL[p.line.region]}`}
+        title={`Linha ${p.line.code}`}
+        sub={`${p.line.name} · ${REGION_LABEL[p.line.region]}`}
         right={
-          <div className="flex items-center gap-1.5">
-            <IconBtn onClick={p.onBack} label="Voltar">
-              <ArrowLeft className="w-5 h-5" />
-            </IconBtn>
-            <IconBtn onClick={p.onToggleFav} label="Favoritar linha" active={p.isFav}>
-              <Star className={`w-5 h-5 ${p.isFav ? 'fill-warn text-warn' : ''}`} />
-            </IconBtn>
-          </div>
+          <>
+            <IconBtn onClick={p.onToggleFav} label="Favoritar linha"><Star size={20} className={p.isFav ? 'fill-warn text-warn' : ''} /></IconBtn>
+            <IconBtn onClick={p.onBack} label="Voltar"><ArrowLeft size={20} /></IconBtn>
+          </>
         }
       />
-
-      <div className="flex-1 scroll-y px-3 py-3 space-y-3.5">
-        {p.alerts.map((a, i) => (
-          <AlertBanner key={i} alert={a} />
-        ))}
-
-        {/* Card de Rastreamento em Tempo Real (Merus) */}
-        <div className="bg-ink-900 border border-ink-700 rounded-2xl p-3.5 space-y-2.5 shadow-md">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2.5">
-              <div
-                className={`h-9 w-9 rounded-xl grid place-items-center ${
-                  p.vehicles.length > 0 ? 'bg-go-soft text-go' : 'bg-ink-800 text-slate-400'
-                }`}
-              >
-                <Bus className="w-5 h-5" />
-              </div>
-              <div>
-                <div className="text-sm font-semibold text-white">
-                  {p.vehicles.length}{' '}
-                  {p.vehicles.length === 1 ? 'ônibus no GPS agora' : 'ônibus no GPS agora'}
-                </div>
-                <div className="text-xs text-slate-400">
-                  {p.vehicles.length > 0
-                    ? 'Rastreamento ao vivo Merus Tracker'
-                    : 'Sem sinal de GPS ativo nesta linha agora'}
-                </div>
-              </div>
-            </div>
-
-            {p.vehicles.length > 0 && (
-              <button
-                onClick={p.onShowOnMap}
-                className="h-9 px-3.5 rounded-xl bg-go text-ink-950 text-xs font-bold flex items-center gap-1.5 shadow active:scale-95 transition"
-              >
-                <MapPinned className="w-4 h-4" />
-                Ver no Mapa
-              </button>
-            )}
+      <div className="scroll-y flex-1 px-4 py-4 space-y-4">
+        {p.alerts.map((a, i) => <AlertBanner key={i} alert={a} />)}
+        {CIRCULAR_MAIN.has(p.line.code) && (
+          <div className="flex gap-3 rounded-xl px-3 py-2.5 border border-route/40 bg-route-soft/60 text-sm">
+            <Info size={18} className="shrink-0 mt-0.5 text-route" />
+            <span className="text-slate-200">{CIRCULAR_NOTE}</span>
           </div>
+        )}
 
-          {p.vehicles.length > 0 && (
-            <div className="flex flex-wrap gap-1.5 pt-1">
-              {p.vehicles.slice(0, 8).map((v) => (
-                <span
-                  key={v.id}
-                  className="text-xs bg-ink-800 border border-ink-600 text-slate-200 px-2.5 py-1 rounded-lg"
-                >
-                  Carro <b>{v.id}</b>
-                  {v.direction ? ` · ${v.direction}` : ''}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
+        <LiveCard vehicles={p.vehicles} onShowOnMap={p.onShowOnMap} />
 
-        {/* Painel Inteligente de Próximas Saídas (Estação Livre vs Bairro) */}
-        <NextDeparture
-          table={todayTable}
-          loading={todayRes === 'loading' || !todayRes}
-          today={today}
-        />
+        <NextCards table={todayTable} loading={!todayRes || todayRes === 'loading'} replacementText={todayReplacement?.text} />
 
-        {/* Seletor de Grade de Horários */}
-        <div className="bg-ink-900 border border-ink-700 rounded-2xl p-3.5 space-y-3 shadow-md">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <Clock className="w-4 h-4 text-route" />
-              <h3 className="font-semibold text-sm text-white">Grade Programada (FAOL)</h3>
-            </div>
+        <section>
+          <div className="flex items-center justify-between mb-2 gap-2">
+            <h2 className="font-sign text-xl font-semibold">Grade de horários</h2>
             <div className="flex items-center gap-1">
-              <a
-                href={faolTableUrl(p.line.code, day)}
-                target="_blank"
-                rel="noreferrer"
-                className="h-8 px-2.5 rounded-lg bg-ink-800 border border-ink-600 text-xs text-slate-300 flex items-center gap-1"
-              >
-                <ExternalLink className="w-3.5 h-3.5" />
-                Original
-              </a>
-              <button
-                onClick={() => load(day, true)}
-                className="h-8 w-8 grid place-items-center rounded-lg bg-ink-800 border border-ink-600 text-slate-300 active:bg-ink-700"
-                aria-label="Atualizar tabela"
-              >
-                <RefreshCw className="w-3.5 h-3.5" />
+              <button onClick={openOriginal} className="h-9 px-3 rounded-full bg-ink-800 border border-ink-600 text-sm flex items-center gap-1.5 active:bg-ink-700">
+                <ExternalLink size={14} /> Ver tabela original
+              </button>
+              <button onClick={() => load(day, true)} className="h-9 w-9 grid place-items-center rounded-full text-slate-300 active:bg-ink-700" aria-label="Atualizar tabela">
+                <RefreshCw size={16} className={viewRes === 'loading' ? 'animate-spin' : ''} />
               </button>
             </div>
           </div>
 
-          {/* Abas de Dia da Semana */}
-          <div className="flex gap-1.5 overflow-x-auto pb-1">
+          <div className="flex gap-2 mb-3 overflow-x-auto scroll-y">
             {days.map((d) => (
               <button
                 key={d}
                 onClick={() => setDay(d)}
-                className={`shrink-0 h-9 px-3.5 rounded-xl text-xs font-semibold border transition ${
-                  day === d
-                    ? 'bg-route text-ink-950 border-route shadow'
-                    : 'bg-ink-800 border-ink-600 text-slate-300'
-                }`}
+                className={`shrink-0 h-10 px-4 rounded-full text-sm font-medium border ${day === d ? 'bg-route text-ink-950 border-route' : 'bg-ink-800 border-ink-600 text-slate-300'}`}
               >
-                {DAY_LABEL[d]}
-                {d === today ? ' (Hoje)' : ''}
+                {DAY_LABEL[d]}{d === today ? ' · hoje' : ''}
               </button>
             ))}
           </div>
 
-          {viewRes === 'loading' || !viewRes ? (
-            <div className="py-8 text-center text-sm text-slate-400 animate-pulse">
-              Consultando horários da linha {p.line.code}…
+          {day === today && !replacement && (
+            <button
+              onClick={() => setOnlyUpcoming((v) => !v)}
+              className={`mb-3 h-10 px-4 rounded-full text-sm font-medium border flex items-center gap-2 ${onlyUpcoming ? 'bg-go-soft border-go/60 text-go' : 'bg-ink-800 border-ink-600 text-slate-300'}`}
+            >
+              <span className={`h-4 w-4 rounded grid place-items-center border ${onlyUpcoming ? 'bg-go border-go text-ink-950' : 'border-slate-500'}`}>
+                {onlyUpcoming && <Check size={12} strokeWidth={3} />}
+              </span>
+              Mostrar apenas próximos horários de hoje
+            </button>
+          )}
+
+          {replacement ? (
+            <div className="rounded-xl bg-warn-soft border border-warn/50 p-4 space-y-3">
+              <div className="text-sm text-slate-100">{replacement.text}</div>
+              <div className="flex gap-2">
+                {replacement.related.map((c) => (
+                  <button key={c} onClick={() => p.onOpenLine(c)} className="h-10 px-4 rounded-full bg-ink-800 border border-ink-600 num text-lg active:bg-ink-700">
+                    Linha {c}
+                  </button>
+                ))}
+              </div>
             </div>
+          ) : viewRes === 'loading' || !viewRes ? (
+            <div className="text-slate-400 text-sm py-6 text-center">Carregando tabela…</div>
           ) : !viewTable ? (
-            <div className="p-3.5 rounded-xl bg-warn-soft/60 border border-warn/40 text-xs text-amber-200 space-y-2">
-              <div>{viewRes.error}</div>
-            </div>
+            <div className="rounded-xl bg-halt-soft border border-halt/40 text-sm p-3">{viewRes.error}</div>
           ) : (
             <Grid
               table={viewTable}
@@ -231,228 +162,225 @@ export default function LineDetail(p: Props) {
               setOrigin={setOrigin}
               isToday={day === today}
               onlyUpcoming={onlyUpcoming}
-              setOnlyUpcoming={setOnlyUpcoming}
+              onShowAll={() => setOnlyUpcoming(false)}
+              onOpenOriginal={openOriginal}
             />
           )}
-        </div>
+        </section>
 
-        {/* Botão Offline */}
         <button
           onClick={download}
           disabled={downloading}
-          className="w-full h-11 rounded-2xl bg-ink-800 border border-ink-600 text-sm font-semibold text-slate-200 flex items-center justify-center gap-2 active:bg-ink-700 disabled:opacity-50"
+          className="w-full h-12 rounded-xl border border-ink-600 bg-ink-800 flex items-center justify-center gap-2 font-medium active:bg-ink-700 disabled:opacity-60"
         >
-          <Download className="w-4 h-4 text-route" />
-          {downloading ? 'Salvando tabelas…' : 'Salvar todas as tabelas para uso Offline'}
+          <Download size={18} /> {downloading ? 'Baixando…' : 'Baixar todas as tabelas para uso offline'}
         </button>
-        {dlMsg && <div className="text-xs text-center text-go">{dlMsg}</div>}
-
-        <LineBadge code={p.line.code} size="sm" />
+        {dlMsg && <div className="text-sm text-slate-300 text-center">{dlMsg}</div>}
       </div>
     </div>
   );
 }
 
-function NextDeparture({
-  table,
-  loading,
-  today,
-}: {
-  table: Timetable | null;
-  loading: boolean;
-  today: DayCode;
-}) {
-  const now = useNow(5000);
-  const rows = useMemo(() => (table ? nextByColumn(table, minutesOfDay(now)) : []), [table, now]);
-
+const LiveCard = memo(function LiveCard({ vehicles, onShowOnMap }: { vehicles: MerusVehicle[]; onShowOnMap: () => void }) {
+  const on = vehicles.length > 0;
   return (
-    <div className="bg-ink-900 border border-ink-700 rounded-2xl p-3.5 space-y-2.5 shadow-md">
+    <section className={`rounded-2xl border p-4 ${on ? 'bg-go-soft/50 border-go/40' : 'bg-ink-800 border-ink-600'}`}>
       <div className="flex items-center justify-between">
-        <span className="text-xs font-bold uppercase tracking-wider text-route">
-          Próximas Saídas · {DAY_LABEL[today]}
-        </span>
-      </div>
-
-      {loading && <div className="text-xs text-slate-400 py-2">Calculando próximas partidas…</div>}
-      {!loading && !table && (
-        <div className="text-xs text-slate-400 py-1">
-          Selecione Dias Úteis ou Sábado abaixo para consultar a grade.
+        <div className="flex items-center gap-3">
+          <Bus className={on ? 'text-go' : 'text-slate-500'} size={26} />
+          <div>
+            <div className="num text-3xl leading-none font-semibold">{vehicles.length}</div>
+            <div className="text-xs text-slate-400 mt-1">{on ? 'ônibus rodando agora (GPS)' : 'nenhum ônibus com GPS agora'}</div>
+          </div>
         </div>
-      )}
-
-      {table && rows.length > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          {rows.map((r) => (
-            <div
-              key={r.origin}
-              className="bg-ink-950/90 border border-ink-800 rounded-xl p-3 flex items-center justify-between gap-2"
-            >
-              <div className="min-w-0">
-                <div className="text-[11px] uppercase tracking-wide text-slate-400 truncate">
-                  Saída: <b className="text-slate-200">{r.origin}</b>
-                </div>
-                {r.next ? (
-                  <div className="mt-0.5 flex items-baseline gap-2">
-                    <span className="num text-2xl font-bold text-white">{r.next.time}</span>
-                    {r.after && (
-                      <span className="text-xs text-slate-400">depois {r.after.time}</span>
-                    )}
-                  </div>
-                ) : (
-                  <div className="text-xs text-slate-500 mt-1">Sem horários</div>
-                )}
-              </div>
-
-              {r.minutesLeft !== undefined && (
-                <div className="shrink-0 text-right">
-                  <div className="text-[10px] text-slate-400 uppercase">Daqui a</div>
-                  <div className="num text-base font-bold text-go bg-go-soft px-2.5 py-1 rounded-lg">
-                    {formatCountdown(r.minutesLeft)}
-                  </div>
-                </div>
-              )}
-            </div>
+        <button
+          onClick={onShowOnMap}
+          disabled={!on}
+          className="flex items-center gap-2 h-11 px-4 rounded-full bg-go text-ink-950 font-semibold disabled:bg-ink-700 disabled:text-slate-500"
+        >
+          <MapPinned size={18} /> Ver no mapa
+        </button>
+      </div>
+      {on && (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {vehicles.slice(0, 8).map((v, i) => (
+            <span key={`${v.id}-${i}`} className="text-xs bg-ink-900/70 rounded-md px-2 py-1 text-slate-300">
+              {v.id}{v.direction ? ` · ${v.direction}` : ''}
+            </span>
           ))}
         </div>
       )}
+    </section>
+  );
+});
+
+function DepartureCard({ tag, row, tone }: { tag: string; row: NextByColumn; tone: 'route' | 'go' }) {
+  const eta = row.minutesLeft !== undefined ? etaParts(row.minutesLeft) : null;
+  const soon = row.minutesLeft !== undefined && row.minutesLeft <= 5;
+  return (
+    <div className={`rounded-2xl p-3 border ${tone === 'route' ? 'bg-route-soft/50 border-route/40' : 'bg-go-soft/40 border-go/40'}`}>
+      <div className={`text-[10px] font-semibold uppercase tracking-wider ${tone === 'route' ? 'text-route' : 'text-go'}`}>{tag}</div>
+      <div className="text-sm font-medium truncate mt-0.5">{row.origin}</div>
+      <div className="mt-2 flex items-baseline gap-1">
+        {eta ? (
+          <>
+            <span className={`num font-bold leading-none ${eta.big.length > 4 ? 'text-4xl' : 'text-6xl'} ${soon ? 'text-go' : 'text-slate-50'}`}>{eta.big}</span>
+            <span className="text-base text-slate-300">{eta.unit}</span>
+          </>
+        ) : (
+          <span className="num text-4xl text-slate-500">—</span>
+        )}
+      </div>
+      <div className="text-xs text-slate-400 mt-2 num">
+        {row.next ? <>às <b className="text-slate-100 text-base font-semibold">{row.next.time}</b>{row.after && <> · depois {row.after.time}</>}</> : 'sem mais saídas hoje'}
+      </div>
     </div>
   );
 }
 
-function Grid({
-  table,
-  fromCache,
-  origin,
-  setOrigin,
-  isToday,
-  onlyUpcoming,
-  setOnlyUpcoming,
-}: {
+/** Cartões lado a lado: Estação Livre x Bairro. Atualiza a cada 10 s, só este bloco re-renderiza. */
+function NextCards({ table, loading, replacementText }: { table: Timetable | null; loading: boolean; replacementText?: string }) {
+  const now = useNow(10000);
+  const rows = useMemo(() => (table ? nextByColumn(table, minutesOfDay(now)) : []), [table, now]);
+  const terminal = rows.find((r) => r.isTerminal);
+  const bairros = rows.filter((r) => !r.isTerminal).sort((a, b) => (a.minutesLeft ?? 9999) - (b.minutesLeft ?? 9999));
+
+  let cards: { tag: string; row: NextByColumn; tone: 'route' | 'go' }[] = [];
+  if (terminal) cards.push({ tag: 'Saindo da Estação Livre', row: terminal, tone: 'route' });
+  if (bairros[0]) cards.push({ tag: 'Saindo do bairro', row: bairros[0], tone: 'go' });
+  if (cards.length === 1 && bairros[1]) cards.push({ tag: 'Saindo do bairro', row: bairros[1], tone: 'go' });
+  if (!terminal && cards.length === 1) cards = [{ ...cards[0], tag: 'Próxima saída' }];
+
+  return (
+    <section>
+      <div className="flex items-baseline justify-between mb-2">
+        <h2 className="font-sign text-xl font-semibold">Próxima saída</h2>
+        <span className="text-xs text-slate-400">hoje · {DAY_LABEL[dayTypeOf()]}</span>
+      </div>
+      {replacementText && <div className="rounded-xl bg-warn-soft border border-warn/50 p-3 text-sm">{replacementText}</div>}
+      {!replacementText && loading && <div className="rounded-xl bg-ink-800 border border-ink-600 p-4 text-sm text-slate-400">Carregando…</div>}
+      {!replacementText && !loading && !table && <div className="rounded-xl bg-ink-800 border border-ink-600 p-4 text-sm text-slate-400">Tabela de hoje indisponível.</div>}
+      {!replacementText && table && cards.length > 0 && (
+        <>
+          <div className={`grid gap-3 ${cards.length > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
+            {cards.map((c) => <DepartureCard key={c.row.origin} {...c} />)}
+          </div>
+          {bairros.filter((b) => !cards.some((c) => c.row === b) && b.next).length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-2 text-xs text-slate-300">
+              {bairros.filter((b) => !cards.some((c) => c.row === b) && b.next).map((b) => (
+                <span key={b.origin} className="bg-ink-800 border border-ink-600 rounded-md px-2 py-1">
+                  {b.origin} · <span className="num text-sm text-slate-100">{b.next!.time}</span>
+                </span>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+function Grid(props: {
   table: Timetable;
   fromCache: boolean;
   origin: string | null;
   setOrigin: (o: string) => void;
   isToday: boolean;
   onlyUpcoming: boolean;
-  setOnlyUpcoming: (fn: (prev: boolean) => boolean) => void;
+  onShowAll: () => void;
+  onOpenOriginal: () => void;
 }) {
+  const { table, isToday } = props;
   const now = useNow(30000);
   const nowMin = minutesOfDay(now);
-  const col = table.columns.find((c) => c.origin === origin) ?? table.columns[0];
+  const col = table.columns.find((c) => c.origin === props.origin) ?? table.columns[0];
 
   if (!col) {
     return (
-      <div className="text-xs text-slate-400 py-4">
-        Toque no botão "Original" acima para abrir a tabela diretamente no site da FAOL.
+      <div className="rounded-xl bg-warn-soft border border-warn/40 p-3 text-sm space-y-2">
+        <div className="font-medium text-warn">Não consegui ler esta tabela automaticamente.</div>
+        <div className="text-slate-300">O layout da página pode ter mudado. Abra a tabela original ou veja o conteúdo bruto na aba Diagnóstico.</div>
+        <button onClick={props.onOpenOriginal} className="h-10 px-4 rounded-full bg-ink-800 border border-ink-600 flex items-center gap-2"><ExternalLink size={15} /> Ver tabela original</button>
+        {table.rawText && <pre className="text-xs whitespace-pre-wrap max-h-48 overflow-auto text-slate-400">{table.rawText}</pre>}
       </div>
     );
   }
 
+  const filtering = isToday && props.onlyUpcoming;
+  const visible = filtering ? col.departures.filter((d) => d.minutes >= nowMin - 1) : col.departures;
   const nextMin = isToday ? col.departures.find((d) => d.minutes >= nowMin)?.minutes : undefined;
-
-  const filteredDeps =
-    isToday && onlyUpcoming
-      ? col.departures.filter((d) => d.minutes >= nowMin - 5)
-      : col.departures;
-
-  const byHour = new Map<number, typeof col.departures>();
-  filteredDeps.forEach((d) => {
+  const currentHour = Math.floor(nowMin / 60);
+  const byHour = new Map<number, typeof visible>();
+  visible.forEach((d) => {
     const h = Math.floor(d.minutes / 60);
     byHour.set(h, [...(byHour.get(h) ?? []), d]);
   });
 
-  const usedRamais = [...new Set(col.departures.map((d) => d.ramal).filter(Boolean))] as string[];
-
   return (
-    <div className="space-y-3">
-      {/* Seletor de Ponto de Partida (Estação Livre vs Bairros/Sub-rotas) */}
+    <div>
+      {props.fromCache && (
+        <div className="flex items-center gap-2 text-xs text-warn mb-2">
+          <WifiOff size={13} /> Cópia offline de {new Date(table.fetchedAt).toLocaleDateString('pt-BR')}
+        </div>
+      )}
       {table.columns.length > 1 && (
-        <div className="space-y-1">
-          <div className="text-[11px] text-slate-400 font-medium">Sentido / Ponto de Partida:</div>
-          <div className="flex flex-wrap gap-1.5">
-            {table.columns.map((c) => (
-              <button
-                key={c.origin}
-                onClick={() => setOrigin(c.origin)}
-                className={`h-9 px-3 rounded-xl text-xs font-semibold border transition ${
-                  c.origin === col.origin
-                    ? 'bg-ink-700 border-route text-white'
-                    : 'bg-ink-950 border-ink-700 text-slate-400'
-                }`}
-              >
-                {c.origin} ({c.departures.length})
-              </button>
-            ))}
-          </div>
+        <div className="flex gap-2 mb-3 overflow-x-auto scroll-y">
+          {table.columns.map((c) => (
+            <button
+              key={c.origin}
+              onClick={() => props.setOrigin(c.origin)}
+              className={`shrink-0 h-9 px-3 rounded-lg text-sm border ${c.origin === col.origin ? 'bg-ink-600 border-route text-white' : 'bg-ink-800 border-ink-600 text-slate-300'}`}
+            >
+              {c.isTerminal ? '' : 'Saindo de '}{c.origin}
+            </button>
+          ))}
         </div>
       )}
 
-      {isToday && (
-        <div className="flex items-center justify-between text-xs pt-1">
-          <span className="text-slate-400">
-            {fromCache ? `Salvo offline` : `Sincronizado com a FAOL`}
-          </span>
-          <button
-            onClick={() => setOnlyUpcoming((prev) => !prev)}
-            className={`px-2.5 py-1 rounded-lg border font-medium ${
-              onlyUpcoming
-                ? 'bg-go-soft border-go/50 text-go'
-                : 'bg-ink-800 border-ink-600 text-slate-300'
-            }`}
-          >
-            {onlyUpcoming ? 'Mostrando só próximos' : 'Filtrar só próximos'}
-          </button>
+      {visible.length === 0 ? (
+        <div className="rounded-xl bg-ink-800 border border-ink-600 p-4 text-sm text-slate-300 space-y-2">
+          <div>Não há mais saídas hoje nesta origem.</div>
+          <button onClick={props.onShowAll} className="h-9 px-3 rounded-full bg-ink-700 text-sm">Mostrar o dia todo</button>
+        </div>
+      ) : (
+        <div className="rounded-2xl border border-ink-700 overflow-hidden">
+          {[...byHour.entries()].map(([h, deps]) => (
+            <div
+              key={h}
+              className={`flex items-start gap-3 px-3 py-2.5 border-b border-ink-800 last:border-0 ${isToday && h === currentHour ? 'bg-ink-800/70' : ''}`}
+            >
+              <div className={`num text-2xl w-10 leading-9 ${isToday && h === currentHour ? 'text-route' : 'text-slate-500'}`}>{String(h).padStart(2, '0')}</div>
+              <div className="flex flex-wrap gap-2 flex-1">
+                {deps.map((d) => {
+                  const past = isToday && d.minutes < nowMin;
+                  const next = d.minutes === nextMin;
+                  return (
+                    <span
+                      key={d.time + (d.ramal ?? '')}
+                      className={`num text-xl h-9 px-2.5 rounded-lg grid place-items-center min-w-[46px] ${
+                        next ? 'bg-go text-ink-950 font-bold ring-2 ring-go/40' : past ? 'text-slate-600' : 'bg-ink-700 text-slate-50'
+                      }`}
+                    >
+                      <span>
+                        {d.time.slice(3)}
+                        {d.ramal && (
+                          <sup className="ml-0.5 text-[11px] font-bold" style={{ color: next ? '#04261c' : ramalColor(d.ramal) }}>{d.ramal}</sup>
+                        )}
+                      </span>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
-      {/* Linhas por Faixa Horária */}
-      <div className="divide-y divide-ink-800 border border-ink-800 rounded-xl overflow-hidden">
-        {[...byHour.entries()].map(([h, deps]) => (
-          <div key={h} className="flex items-center gap-2.5 px-3 py-2 bg-ink-950/60">
-            <div className="num w-9 text-sm font-bold text-route shrink-0">
-              {String(h).padStart(2, '0')}h
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {deps.map((d) => {
-                const past = isToday && d.minutes < nowMin;
-                const next = d.minutes === nextMin;
-                return (
-                  <span
-                    key={`${d.time}${d.ramal ?? ''}`}
-                    className={`num px-2.5 py-1 rounded-lg text-sm font-semibold flex items-center gap-1 ${
-                      next
-                        ? 'bg-go text-ink-950 font-bold ring-2 ring-go/50'
-                        : past
-                        ? 'bg-ink-900 text-slate-500'
-                        : 'bg-ink-800 text-slate-100'
-                    }`}
-                  >
-                    {d.time}
-                    {d.ramal && (
-                      <b
-                        style={{ color: next ? '#04261c' : ramalColor(d.ramal) }}
-                        className="text-xs"
-                      >
-                        -{d.ramal}
-                      </b>
-                    )}
-                  </span>
-                );
-              })}
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* Legenda de Ramais */}
-      {(table.legend.length > 0 || usedRamais.length > 0) && (
-        <div className="bg-ink-950 border border-ink-800 rounded-xl p-3 space-y-1">
-          <div className="text-[11px] font-bold uppercase text-slate-400">Legenda de Ramais</div>
+      {table.legend.length > 0 && (
+        <div className="mt-3 text-sm space-y-1">
+          <div className="text-xs text-slate-400">Ramais</div>
           {table.legend.map((l) => (
-            <div key={l.code} className="text-xs text-slate-300 flex items-center gap-2">
-              <span className="font-bold text-route">{l.code}:</span>
-              <span>{l.label}</span>
-            </div>
+            <div key={l.code} className="text-slate-300"><span className="num font-semibold text-route">{l.code}</span> {l.label}</div>
           ))}
         </div>
       )}

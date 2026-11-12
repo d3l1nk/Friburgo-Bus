@@ -1,4 +1,4 @@
-import type { FaolLine, RegionId } from '../types';
+import type { DayCode, FaolLine, RegionId } from '../types';
 
 export const REGIONS: { id: RegionId; label: string }[] = [
   { id: 'circular', label: 'Circular' },
@@ -103,4 +103,24 @@ export function resolveLineKey(input: unknown): string {
 export function findLine(codeOrKey: string): FaolLine | undefined {
   const k = lineKey(codeOrKey);
   return FAOL_LINES.find((l) => lineKey(l.code) === k);
+}
+
+// ---------- Casos especiais ----------
+export const CIRCULAR_MAIN = new Set(['100', '200', '400', '500']);
+
+export const CIRCULAR_NOTE =
+  'Linha circular. Os horários seguem a tabela original da FAOL; em caso de dúvida, abra a tabela original.';
+
+const DAY_REPLACEMENTS: { code: string; day: DayCode; text: string; related: string[] }[] = [
+  {
+    code: '54',
+    day: 'D',
+    text: 'Aos domingos a linha 54 não tem tabela própria: o atendimento é feito pelas linhas 53, 55 e 500.',
+    related: ['53', '55', '500'],
+  },
+];
+
+/** Dia em que a linha não tem tabela e é atendida por outras. */
+export function dayReplacement(code: string, day: DayCode) {
+  return DAY_REPLACEMENTS.find((r) => r.code === code && r.day === day);
 }

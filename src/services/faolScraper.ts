@@ -1,46 +1,41 @@
 import { httpRequest } from '../lib/http';
 import { recordDebug } from '../lib/debug';
 import { getJSON, listKeys, removeKey, setJSON } from '../lib/storage';
-import { CIRCULAR_TABLE_LINES, findLine, isKnownKey, resolveLineKey } from '../data/faolLines';
+import { CIRCULAR_MAIN, CIRCULAR_TABLE_LINES, findLine, isKnownKey, lineKey, resolveLineKey } from '../data/faolLines';
 import type {
   AlertsCache,
   DayCode,
   Departure,
   FaolAlert,
+  FaolLinks,
   Timetable,
   TimetableColumn,
   TimetableResult,
 } from '../types';
 
 export const FAOL_HORARIOS_URL = 'https://www.faol.com.br/horarios';
-export const faolTableUrl = (code: string, day: DayCode) =>
-  `https://www.faol.com.br/tabelas/${code}-${day}`;
+export const faolTableUrl = (code: string, day: DayCode) => `https://faol.com.br/tabelas/${code}-${day}`;
 
 const ALERTS_KEY = 'faol:alerts:v2';
-const LINKS_KEY = 'faol:links:v2';
-const TABLE_PREFIX = 'faol:table:v2:';
+const TABLE_PREFIX = 'faol:table:';
 const TABLE_MAX_AGE_MS = 24 * 3600 * 1000;
 
 const HEADERS = {
-  accept: 'text/html,application/xhtml+xml,application/pdf,*/*',
+  accept: 'text/html,application/xhtml+xml',
   'accept-language': 'pt-BR,pt;q=0.9',
-  'user-agent':
-    'Mozilla/5.0 (Linux; Android 14; SM-A546E) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
-  Referer: 'https://www.faol.com.br/horarios',
+  'user-agent': 'Mozilla/5.0 (Linux; Android 13; Mobile) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36',
 };
 
-type LinkMap = Record<string, Partial<Record<DayCode, string>>>;
-let memoryLinks: LinkMap | null = null;
-
+// =====================================================================
+// Utilidades de DOM
+// =====================================================================
 const BLOCK = new Set([
-  'P', 'DIV', 'LI', 'UL', 'OL', 'TR', 'TABLE', 'TBODY', 'THEAD', 'TFOOT',
-  'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'SECTION', 'ARTICLE', 'HEADER',
-  'FOOTER', 'BR', 'HR', 'DT', 'DD', 'BLOCKQUOTE', 'FORM', 'MAIN', 'ASIDE', 'NAV',
+  'P', 'DIV', 'LI', 'UL', 'OL', 'TR', 'TABLE', 'TBODY', 'THEAD', 'TFOOT', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6',
+  'SECTION', 'ARTICLE', 'HEADER', 'FOOTER', 'BR', 'HR', 'DT', 'DD', 'BLOCKQUOTE', 'FORM', 'MAIN', 'ASIDE', 'NAV',
 ]);
 
 const clean = (s: string) => s.replace(/\s+/g, ' ').trim();
-const norm = (s: string) =>
-  s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+const norm = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 
 function parseHtml(html: string): Document {
   const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -48,6 +43,7 @@ function parseHtml(html: string): Document {
   return doc;
 }
 
+/** Converte um elemento em linhas de texto, quebrando em elementos de bloco. */
 function textLines(root: Node): string[] {
   const out: string[] = [];
   let buf = '';
@@ -74,22 +70,22 @@ function textLines(root: Node): string[] {
 }
 
 // =====================================================================
-// Alertas e Mapeamento de Links Reais em /horarios
+// Alertas (ALTERAÇÃO / ATENÇÃO) em /horarios
 // =====================================================================
 const ALERT_RE = /^(ALTERA[ÇC][ÃA]O|ATEN[ÇC][ÃA]O)\b\s*[:!\-–—.]*\s*(.*)$/i;
-const CODE_RE = /(?<!\d)(\d{2,3}[A-Za-z]?)(?!\d)/g;
+const CODE_RE = /(?<!\d)(\d{2,3}[A-Za-z]?)(?![A-Za-z0-9:])/;
 
-function kindOf(s: string): 'ALTERAÇÃO' | 'ATENÇÃO' {
-  return /^altera/i.test(norm(s)) ? 'ALTERAÇÃO' : 'ATENÇÃO';
+function kindOf(word: string): FaolAlert['kind'] {
+  return /^altera/i.test(norm(word)) ? 'ALTERAÇÃO' : 'ATENÇÃO';
 }
 
-function keyFromStrings(candidates: (string | null | undefined)[]): string {
-  for (const s of candidates) {
+function keyFromStrings(strings: (string | null | undefined)[]): string {
+  for (const s of strings) {
     if (!s) continue;
-    for (const m of s.matchAll(CODE_RE)) {
-      const k = resolveLineKey(m[1]);
-      if (k && isKnownKey(k)) return k;
-    }
+    const m = s.match(CODE_RE);
+    if (!m) continue;
+    const k = resolveLineKey(m[1]);
+    if (k && isKnownKey(k)) return k;
   }
   return '';
 }
@@ -101,8 +97,8 @@ function alertsFromLines(lines: string[], key: string | (() => string)): FaolAle
     if (!m) continue;
     let text = m[2];
     let j = i + 1;
-    while (j < lines.length && j <= i + 3 && !ALERT_RE.test(lines[j]) && !/selecione o hor/i.test(lines[j])) {
-      text = text ? `${text} ${lines[j]}` : lines[j];
+    while (!text && j < lines.length && j <= i + 3 && !ALERT_RE.test(lines[j])) {
+      text = lines[j];
       j++;
     }
     text = clean(text);
@@ -112,70 +108,28 @@ function alertsFromLines(lines: string[], key: string | (() => string)): FaolAle
   return out;
 }
 
-/** Extrai o mapa de URLs exatas dos botões (Dias Úteis, Sábado, Domingo, Circular) da FAOL */
-export function extractTableLinks(html: string): LinkMap {
-  const doc = parseHtml(html);
-  const map: LinkMap = {};
+function modalContainers(doc: Document): HTMLElement[] {
+  const all = [...doc.querySelectorAll<HTMLElement>('.modal, [role="dialog"], [id*="modal" i]')];
+  return all.filter((c) => !all.some((o) => o !== c && o.contains(c)));
+}
 
-  doc.querySelectorAll('a[href]').forEach((a) => {
-    const rawHref = a.getAttribute('href')?.trim() ?? '';
-    if (!rawHref || rawHref.startsWith('#') || rawHref.startsWith('javascript')) return;
-
-    const label = norm(a.textContent ?? '');
-    let day: DayCode | null = null;
-    if (label.includes('uteis') || label.includes('úteis') || label.includes('util')) day = 'U';
-    else if (label.includes('sabado') || label.includes('sábado')) day = 'S';
-    else if (label.includes('domingo') || label.includes('feriado')) day = 'D';
-    else if (label.includes('circular')) day = 'C';
-
-    const urlMatch = rawHref.match(/tabelas\/([^/?#]+?)(?:[-_]([USDCusdc]))?(?:\.pdf|\.html|\.php)?$/);
-    if (!day && urlMatch?.[2]) {
-      day = urlMatch[2].toUpperCase() as DayCode;
-    }
-    if (!day) return;
-
-    const modal = a.closest('.modal, [role="dialog"], [id*="modal" i], div');
-    const heads = modal
-      ? [...modal.querySelectorAll('.modal-title, h1, h2, h3, h4, h5, h6')].map((h) => h.textContent)
-      : [];
-    const k = keyFromStrings([
-      urlMatch?.[1],
-      modal?.id,
-      ...heads,
-    ]);
-    if (!k) return;
-
-    const fullUrl = rawHref.startsWith('http')
-      ? rawHref
-      : `https://www.faol.com.br/${rawHref.replace(/^\/+/, '')}`;
-
-    map[k] = map[k] ?? {};
-    map[k]![day] = fullUrl;
-  });
-
-  return map;
+function modalKey(c: HTMLElement, lines: string[]): string {
+  const heads = [...c.querySelectorAll('.modal-title, h1, h2, h3, h4, h5, h6')].map((h) => h.textContent);
+  return keyFromStrings([c.id, c.getAttribute('data-linha'), c.getAttribute('data-line'), c.getAttribute('aria-labelledby'), ...heads, ...lines.slice(0, 2)]);
 }
 
 export function parseAlerts(html: string): FaolAlert[] {
   const doc = parseHtml(html);
   const found: FaolAlert[] = [];
 
-  const all = [...doc.querySelectorAll('.modal, [role="dialog"], [id*="modal" i]')];
-  const containers = all.filter((c) => !all.some((o) => o !== c && o.contains(c)));
-  for (const c of containers) {
+  // 1) Modais por linha
+  for (const c of modalContainers(doc)) {
     const lines = textLines(c);
-    const heads = [...c.querySelectorAll('.modal-title, h1, h2, h3, h4, h5, h6')].map((h) => h.textContent);
-    const key = keyFromStrings([
-      c.id,
-      c.getAttribute('data-linha'),
-      c.getAttribute('data-line'),
-      c.getAttribute('aria-labelledby'),
-      ...heads,
-      ...lines.slice(0, 3),
-    ]);
+    const key = modalKey(c, lines);
     if (key) found.push(...alertsFromLines(lines, key));
   }
 
+  // 2) Fallback: varre a página inteira acompanhando o cabeçalho da linha corrente
   if (!found.length) {
     const lines = textLines(doc.body);
     let current = '';
@@ -202,6 +156,56 @@ export function parseAlerts(html: string): FaolAlert[] {
   });
 }
 
+// =====================================================================
+// Links reais das tabelas (botões Dias Úteis / Sábado / Domingo / Circular)
+// =====================================================================
+const TABLE_HREF = /tabelas\/([^/?#]+?)-([USDC])(?:[/?#.]|$)/i;
+const DAY_TEXT: [RegExp, DayCode][] = [
+  [/dias?\s*[uú]teis/i, 'U'],
+  [/s[aá]bado/i, 'S'],
+  [/domingo/i, 'D'],
+  [/circular/i, 'C'],
+];
+
+export function parseLinks(html: string): FaolLinks {
+  const doc = parseHtml(html);
+  const links: FaolLinks = {};
+  const add = (key: string, day: DayCode, href: string) => {
+    try {
+      const url = new URL(href, FAOL_HORARIOS_URL).toString();
+      if (!links[key]) links[key] = {};
+      if (!links[key][day]) links[key][day] = url;
+    } catch {
+      /* href inválido */
+    }
+  };
+  const usable = (href: string | null): href is string => !!href && !/^(#|javascript:|mailto:|tel:)/i.test(href.trim());
+
+  // a) qualquer link no padrão /tabelas/{LINHA}-{DIA}
+  doc.querySelectorAll('a[href]').forEach((a) => {
+    const href = a.getAttribute('href');
+    if (!usable(href)) return;
+    const m = href.match(TABLE_HREF);
+    if (!m) return;
+    const key = resolveLineKey(m[1]);
+    if (key) add(key, m[2].toUpperCase() as DayCode, href);
+  });
+
+  // b) links fora do padrão, identificados pelo texto do botão dentro do modal da linha
+  for (const c of modalContainers(doc)) {
+    const key = modalKey(c, textLines(c));
+    if (!key) continue;
+    c.querySelectorAll('a[href]').forEach((a) => {
+      const href = a.getAttribute('href');
+      if (!usable(href) || TABLE_HREF.test(href)) return;
+      const txt = clean(a.textContent ?? '');
+      const hit = DAY_TEXT.find(([re]) => re.test(txt));
+      if (hit) add(key, hit[1], href);
+    });
+  }
+  return links;
+}
+
 async function fetchHtml(debugKey: string, url: string, summarize: (html: string) => unknown) {
   const res = await httpRequest<string>({ url, method: 'GET', headers: HEADERS, responseType: 'text' });
   const html = typeof res.data === 'string' ? res.data : '';
@@ -214,15 +218,14 @@ async function fetchHtml(debugKey: string, url: string, summarize: (html: string
     ms: res.ms,
     ok: res.ok,
     error: res.error,
-    data: res.ok
-      ? { htmlLength: html.length, parsed: summarize(html), htmlPreview: html.slice(0, 12000) }
-      : res.data,
+    data: res.ok ? { htmlLength: html.length, parsed: summarize(html), htmlPreview: html.slice(0, 20000) } : res.data,
   });
   return { res, html };
 }
 
 export interface AlertsResult {
   alerts: FaolAlert[];
+  links: FaolLinks;
   fromCache: boolean;
   savedAt: number;
   error?: string;
@@ -230,24 +233,13 @@ export interface AlertsResult {
 
 export async function getAlerts(): Promise<AlertsResult> {
   const cache = await getJSON<AlertsCache>(ALERTS_KEY);
-  const { res, html } = await fetchHtml('faol-alerts', FAOL_HORARIOS_URL, (h) => parseAlerts(h));
+  const { res, html } = await fetchHtml('faol-alerts', FAOL_HORARIOS_URL, (h) => ({ alerts: parseAlerts(h), links: parseLinks(h) }));
   if (!res.ok || !html) {
-    return {
-      alerts: cache?.alerts ?? [],
-      fromCache: true,
-      savedAt: cache?.savedAt ?? 0,
-      error: res.error ?? 'Sem resposta',
-    };
+    return { alerts: cache?.alerts ?? [], links: cache?.links ?? {}, fromCache: true, savedAt: cache?.savedAt ?? 0, error: res.error ?? 'Sem resposta' };
   }
-  const alerts = parseAlerts(html);
-  const links = extractTableLinks(html);
-  if (Object.keys(links).length > 0) {
-    memoryLinks = links;
-    await setJSON(LINKS_KEY, links);
-  }
-  const entry: AlertsCache = { savedAt: Date.now(), alerts };
+  const entry: AlertsCache = { savedAt: Date.now(), alerts: parseAlerts(html), links: parseLinks(html) };
   await setJSON(ALERTS_KEY, entry);
-  return { alerts, fromCache: false, savedAt: entry.savedAt };
+  return { alerts: entry.alerts, links: entry.links ?? {}, fromCache: false, savedAt: entry.savedAt };
 }
 
 export async function getCachedAlerts(): Promise<AlertsCache | null> {
@@ -255,31 +247,22 @@ export async function getCachedAlerts(): Promise<AlertsCache | null> {
 }
 
 // =====================================================================
-// Parser Avançado de Tabelas (Suporta Cabeçalho Duplo, HTML e PDF/Texto)
+// Tabelas de horários
 // =====================================================================
-const HOUR_COL_RE = /faixa|hor[aá]ri[oa]|^hora$/i;
-const TERMINAL_RE = /esta[cç][aã]o\s*livre|terminal|centro|rodovi[aá]ria/i;
+const TERMINAL_RE = /esta[cç][aã]o\s*livre|terminal/i;
+const PARTIDAS_RE = /partidas?\s*de\s*:?/i;
+const GENERIC_HEAD = /^(partidas?\s*de\s*:?|faixa|hor[aá]ri[ao]s?|hora|linha|dia)$/i;
+const HOUR_ONLY = /^\s*(\d{1,2})\s*(?:[:hH]\s*(\d{2})?)?\s*(?:hs?|horas?)?\s*$/;
 
-function cleanOrigin(s: string, index: number): string {
-  const cleaned = clean(
-    s
-      .replace(/partidas?\s*de\s*:?/gi, '')
-      .replace(/faixa\s*hor[aá]ria/gi, '')
-      .replace(/hor[aá]rios?/gi, ''),
-  );
-  return cleaned || `Sentido ${index}`;
-}
-
-/** Extrai horários de uma célula ("00 15 30A 45-B" ou "04:15 04:45") */
+/** "00 15 30A 45-B" ou "04:15 04:45" -> saídas */
 function tokenizeCell(text: string, rowHour: number | null): Departure[] {
   const out: Departure[] = [];
-  const cleaned = text.replace(/\b24:/g, '00:');
-  const re = /(?:(\d{1,2})\s*[:hH]\s*)?(\d{2})(?!\d)(?:\s*[-–/(]?\s*([A-Za-z])(?![A-Za-z]))?/g;
+  const re = /(?<!\d)(?:(\d{1,2})\s*[:hH]\s*)?(\d{2})(?!\d)(?:\s*[-(]?\s*([A-Za-z])(?![A-Za-z]))?/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(cleaned))) {
+  while ((m = re.exec(text))) {
     const h = m[1] !== undefined ? parseInt(m[1], 10) : rowHour;
     const min = parseInt(m[2], 10);
-    if (h === null || h < 0 || h > 29 || min < 0 || min > 59) continue;
+    if (h === null || h > 29 || min > 59) continue;
     const hh = h % 24;
     out.push({
       time: `${String(hh).padStart(2, '0')}:${String(min).padStart(2, '0')}`,
@@ -290,154 +273,173 @@ function tokenizeCell(text: string, rowHour: number | null): Departure[] {
   return out;
 }
 
-/** Expansão de células com colspan para alinhar cabeçalhos duplos */
-function expandRowCells(row: Element): string[] {
-  const out: string[] = [];
-  row.querySelectorAll('th,td').forEach((cell) => {
-    const txt = clean(cell.textContent ?? '');
-    const span = Math.max(1, parseInt(cell.getAttribute('colspan') ?? '1', 10) || 1);
-    for (let i = 0; i < span; i++) out.push(txt);
-  });
-  return out;
+interface Cell {
+  text: string;
 }
 
-function isDataRow(cells: string[]): boolean {
-  if (!cells.length) return false;
-  // Uma linha de dados começa com faixa horária (ex: "04:00", "04", "05:00") ou possui horários HH:MM nas células
-  const timeCells = cells.filter((c) => /\b\d{1,2}[:hH]\d{2}\b/.test(c) || /^\d{2}(\s*[-A-Z])?$/.test(c));
-  return timeCells.length >= 1 && /^\d{1,2}(:\d{2})?$/.test(cells[0] ?? '');
+/** Monta a grade expandindo colspan/rowspan. Células expandidas compartilham a mesma referência. */
+function buildGrid(rows: HTMLTableRowElement[]): Cell[][] {
+  const grid: (Cell | undefined)[][] = rows.map(() => []);
+  rows.forEach((tr, r) => {
+    let c = 0;
+    [...tr.cells].forEach((cell) => {
+      while (grid[r][c]) c++;
+      const cs = Math.max(1, Math.min(parseInt(cell.getAttribute('colspan') || '1', 10) || 1, 30));
+      const rs = Math.max(1, Math.min(parseInt(cell.getAttribute('rowspan') || '1', 10) || 1, 30));
+      const val: Cell = { text: clean(cell.textContent ?? '') };
+      for (let dr = 0; dr < rs; dr++) for (let dc = 0; dc < cs; dc++) if (grid[r + dr]) grid[r + dr][c + dc] = val;
+      c += cs;
+    });
+  });
+  return grid.map((row) => Array.from(row, (v) => v ?? { text: '' }));
 }
+
+function isDataRow(row: Cell[]): boolean {
+  const first = row.find((c) => c.text);
+  if (!first) return false;
+  const m = first.text.match(HOUR_ONLY);
+  if (!m || parseInt(m[1], 10) > 29) return false;
+  return row.some((c) => c !== first && /\d/.test(c.text));
+}
+
+const stripPartidas = (s: string) => clean(s.replace(PARTIDAS_RE, ''));
 
 function parseTableElement(table: HTMLTableElement): TimetableColumn[] {
-  const rows = [...table.querySelectorAll('tr')];
-  if (rows.length < 2) return [];
+  const grid = buildGrid([...table.rows]);
+  const headerCount = grid.findIndex(isDataRow);
+  if (headerCount < 0) return [];
+  const dataRows = grid.slice(headerCount).filter(isDataRow);
+  const width = Math.max(...grid.map((r) => r.length));
+  const heads = grid.slice(0, headerCount);
 
-  const expandedRows = rows.map(expandRowCells).filter((r) => r.some(Boolean));
-  if (expandedRows.length < 2) return [];
-
-  // Descobre onde começam as linhas de horários (após 1, 2 ou 3 linhas de cabeçalho)
-  let firstBodyIdx = expandedRows.findIndex(isDataRow);
-  if (firstBodyIdx <= 0) firstBodyIdx = 1;
-
-  const headerRows = expandedRows.slice(0, firstBodyIdx);
-  const bodyRows = expandedRows.slice(firstBodyIdx);
-
-  const maxCols = Math.max(...expandedRows.map((r) => r.length));
-  const combinedHeaders: string[] = [];
-
-  for (let colIdx = 0; colIdx < maxCols; colIdx++) {
-    const parts = headerRows
-      .map((r) => r[colIdx] ?? '')
-      .filter((val) => val && !/^partidas?\s*de:?$/i.test(val) && !/^faixa$/i.test(val));
-    const rawHeader = parts[parts.length - 1] || headerRows[headerRows.length - 1]?.[colIdx] || '';
-    combinedHeaders.push(rawHeader);
+  // coluna da Faixa Horária
+  let hourCol = -1;
+  for (let j = 0; j < width; j++) {
+    if (/faixa|hor[aá]ri/i.test(heads.map((r) => r[j]?.text ?? '').join(' '))) {
+      hourCol = j;
+      break;
+    }
   }
+  if (hourCol < 0) hourCol = Math.max(0, dataRows[0].findIndex((c) => c.text && HOUR_ONLY.test(c.text)));
 
-  let hourCol = combinedHeaders.findIndex((h) => HOUR_COL_RE.test(h));
-  if (hourCol < 0 && headerRows.some((r) => HOUR_COL_RE.test(r[0] ?? ''))) {
-    hourCol = 0;
-  }
+  const caption = stripPartidas(clean(table.querySelector('caption')?.textContent ?? ''));
+  const cols: { j: number; pieces: string[]; deps: Departure[] }[] = [];
 
-  // Verifica se todas as células de dados já trazem hora completa HH:MM
-  const hasFullTimesInBody = bodyRows.some((r) =>
-    r.slice(1).some((c) => /\b\d{1,2}:\d{2}\b/.test(c)),
-  );
-  if (hourCol < 0 && hasFullTimesInBody && bodyRows.every((r) => /^\d{2}:00$/.test(r[0] ?? ''))) {
-    hourCol = 0;
-  }
-
-  const caption = clean(table.querySelector('caption')?.textContent ?? '');
-  const cols = new Map<number, Departure[]>();
-
-  for (const cells of bodyRows) {
-    const hm = hourCol >= 0 ? (cells[hourCol] ?? '').match(/(\d{1,2})/) : null;
-    const rowHour = hm ? parseInt(hm[1], 10) : null;
-
-    cells.forEach((txt, j) => {
-      if (j === hourCol || !txt) return;
-      const deps = tokenizeCell(txt, rowHour);
-      if (deps.length) cols.set(j, [...(cols.get(j) ?? []), ...deps]);
+  for (let j = 0; j < width; j++) {
+    if (j === hourCol) continue;
+    const deps: Departure[] = [];
+    for (const r of dataRows) {
+      const cell = r[j];
+      if (!cell || cell === r[hourCol] || (j > 0 && cell === r[j - 1])) continue; // ignora colspan repetido
+      const hm = (r[hourCol]?.text ?? '').match(HOUR_ONLY);
+      deps.push(...tokenizeCell(cell.text, hm ? parseInt(hm[1], 10) : null));
+    }
+    if (!deps.length) continue;
+    const pieces: string[] = [];
+    heads.forEach((r) => {
+      const t = stripPartidas(r[j]?.text ?? '');
+      if (t && !GENERIC_HEAD.test(t) && pieces[pieces.length - 1] !== t) pieces.push(t);
     });
+    cols.push({ j, pieces, deps });
   }
 
-  const result: TimetableColumn[] = [];
-  cols.forEach((deps, j) => {
-    const rawOrigin = combinedHeaders[j] || caption || '';
-    const origin = cleanOrigin(rawOrigin, j);
-    const uniq = new Map<string, Departure>();
-    deps.forEach((d) => uniq.set(`${d.time}${d.ramal ?? ''}`, d));
-    result.push({
+  // nome real de cada coluna = texto mais específico (última linha do cabeçalho)
+  const names = cols.map((c) => c.pieces[c.pieces.length - 1] || caption || 'Partidas');
+  const seen = new Map<string, number>();
+  names.forEach((n) => seen.set(n, (seen.get(n) ?? 0) + 1));
+  const used = new Map<string, number>();
+  return cols.map((c, i) => {
+    let origin = names[i];
+    if ((seen.get(origin) ?? 0) > 1) {
+      origin = c.pieces.length > 1 ? c.pieces.join(' – ') : origin;
+      const n = (used.get(origin) ?? 0) + 1;
+      used.set(origin, n);
+      if (n > 1 || (seen.get(names[i]) ?? 0) > 1) origin = `${origin} (${c.j})`;
+    }
+    const u = new Map<string, Departure>();
+    c.deps.forEach((d) => u.set(`${d.time}${d.ramal ?? ''}`, d));
+    return {
       origin,
-      isTerminal: TERMINAL_RE.test(origin),
-      departures: [...uniq.values()].sort((a, b) => a.minutes - b.minutes),
-    });
+      isTerminal: TERMINAL_RE.test(c.pieces.join(' ') || origin),
+      departures: [...u.values()].sort((a, b) => a.minutes - b.minutes),
+    };
   });
-
-  return result;
 }
 
-/** Parser de tabelas em texto plano / PDF extraído (quando não há <table> HTML) */
-function parseStructuredTextLines(lines: string[]): TimetableColumn[] {
-  // Procura cabeçalhos entre "Horária" e o primeiro horário "04:00" / "05:00"
-  const horariaIdx = lines.findIndex((l) => /^hor[aá]ria$/i.test(l));
-  const firstHourIdx = lines.findIndex(
-    (l, idx) => idx > Math.max(0, horariaIdx) && /^0[3456]:00$/.test(l),
-  );
+/**
+ * Páginas sem <table> utilizável: texto corrido.
+ * Ignora a coluna "Faixa Horária" (04:00, 05:00, 06:00…) e atribui as saídas reais
+ * à última origem declarada ("Partidas de: X").
+ */
+function parseFlow(lines: string[], ignoreFaixa = true): TimetableColumn[] {
+  const TIME = /(?<!\d)([01]?\d|2[0-3]):([0-5]\d)(?!\d)(?:\s*[-(]?\s*([A-Za-z])(?![A-Za-z]))?/g;
+  const skip = new Set<number>();
 
-  let origins: string[] = [];
-  if (horariaIdx >= 0 && firstHourIdx > horariaIdx + 1) {
-    origins = lines
-      .slice(horariaIdx + 1, firstHourIdx)
-      .filter((l) => !/partidas|faixa/i.test(l));
+  if (ignoreFaixa) {
+    let run: number[] = [];
+    let prev = -2;
+    const flush = () => {
+      if (run.length >= 6) run.forEach((i) => skip.add(i));
+      run = [];
+      prev = -2;
+    };
+    lines.forEach((l, i) => {
+      const m = [...l.matchAll(TIME)];
+      if (m.length >= 6 && m.every((x, k) => x[2] === '00' && (k === 0 || +x[1] === +m[k - 1][1] + 1))) {
+        skip.add(i);
+        return;
+      }
+      const only = l.match(/^\s*([01]?\d|2[0-3]):00\s*$/);
+      if (only) {
+        const h = +only[1];
+        if (run.length && h === prev + 1) {
+          run.push(i);
+          prev = h;
+        } else {
+          flush();
+          run = [i];
+          prev = h;
+        }
+      } else flush();
+    });
+    flush();
   }
 
-  if (!origins.length) {
-    origins = ['Estação Livre', 'Bairro'];
-  }
-
-  const bucket = new Map<string, Departure[]>();
-  origins.forEach((o) => bucket.set(o, []));
-
-  const startIdx = firstHourIdx >= 0 ? firstHourIdx : 0;
-  let colCursor = -1; // -1 = coluna "Faixa Horária" (ex: 04:00, 05:00)
-
-  for (let i = startIdx; i < lines.length; i++) {
-    const line = lines[i];
-    const m = line.match(/^([01]?\d|2[0-3]):([0-5]\d)(?:\s*[-–]?\s*([A-Za-z]))?$/);
-    if (!m) continue;
-
-    const hh = parseInt(m[1], 10);
-    const mm = parseInt(m[2], 10);
-    const time = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-
-    // Se for HH:00 na abertura de uma nova faixa horária e o próximo item também estiver na mesma hora
-    const nextLine = lines[i + 1] ?? '';
-    const nextMatch = nextLine.match(/^([01]?\d|2[0-3]):([0-5]\d)/);
-    if (mm === 0 && nextMatch && parseInt(nextMatch[1], 10) === hh && colCursor !== 0) {
-      colCursor = 0;
-      continue;
+  const cols = new Map<string, Departure[]>();
+  let cur = 'Todos os horários';
+  let sawPartidas = false;
+  lines.forEach((l, i) => {
+    let body = l;
+    const ph = l.match(/partidas?\s*de\s*:?\s*(.*)$/i);
+    if (ph) {
+      sawPartidas = true;
+      const name = clean(ph[1].replace(/[\d:].*$/, ''));
+      if (name) cur = name;
+      body = ph[1].slice(name.length);
+    } else if (sawPartidas && !/\d/.test(l) && l.length < 40 && !GENERIC_HEAD.test(l) && lines[i + 1] && /\d{1,2}:\d{2}/.test(lines[i + 1])) {
+      cur = l;
+      return;
     }
-
-    const targetOrigin = origins[Math.max(0, colCursor) % origins.length];
-    bucket.get(targetOrigin)?.push({
-      time,
-      minutes: hh * 60 + mm,
-      ramal: m[3]?.toUpperCase(),
-    });
-    colCursor = (Math.max(0, colCursor) + 1) % origins.length;
-  }
-
-  return [...bucket.entries()]
-    .filter(([, deps]) => deps.length > 0)
-    .map(([origin, deps]) => {
-      const uniq = new Map<string, Departure>();
-      deps.forEach((d) => uniq.set(`${d.time}${d.ramal ?? ''}`, d));
-      return {
-        origin,
-        isTerminal: TERMINAL_RE.test(origin),
-        departures: [...uniq.values()].sort((a, b) => a.minutes - b.minutes),
+    if (skip.has(i)) return;
+    for (const m of body.matchAll(TIME)) {
+      const hh = parseInt(m[1], 10);
+      const mm = parseInt(m[2], 10);
+      const d: Departure = {
+        time: `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`,
+        minutes: hh * 60 + mm,
+        ramal: m[3] ? m[3].toUpperCase() : undefined,
       };
-    });
+      cols.set(cur, [...(cols.get(cur) ?? []), d]);
+    }
+  });
+
+  const out: TimetableColumn[] = [];
+  cols.forEach((deps, origin) => {
+    const u = new Map<string, Departure>();
+    deps.forEach((d) => u.set(`${d.time}${d.ramal ?? ''}`, d));
+    out.push({ origin, isTerminal: TERMINAL_RE.test(origin), departures: [...u.values()].sort((a, b) => a.minutes - b.minutes) });
+  });
+  return out;
 }
 
 function parseLegend(lines: string[], code: string): { code: string; label: string }[] {
@@ -450,9 +452,7 @@ function parseLegend(lines: string[], code: string): { code: string; label: stri
       continue;
     }
     const main = l.match(/^(\d{2,3}[A-Za-z]?)\s+(\p{L}{3}.*)$/u);
-    if (main && resolveLineKey(main[1]) === base && !/partidas|faixa/i.test(l)) {
-      out.set(main[1], main[2]);
-    }
+    if (main && resolveLineKey(main[1]) === base && !/partidas|faixa/i.test(l)) out.set(main[1], main[2]);
   }
   return [...out.entries()].map(([c, label]) => ({ code: c, label }));
 }
@@ -462,55 +462,30 @@ export function parseTimetable(html: string, code: string, day: DayCode): Timeta
   const lines = textLines(doc.body);
 
   let columns: TimetableColumn[] = [];
-  doc.querySelectorAll('table').forEach((t) => {
-    columns.push(...parseTableElement(t as HTMLTableElement));
-  });
+  doc.querySelectorAll('table').forEach((t) => columns.push(...parseTableElement(t as HTMLTableElement)));
 
-  // Mescla colunas com exatamente a mesma origem
+  // junta tabelas diferentes da mesma origem
   const merged = new Map<string, TimetableColumn>();
   columns.forEach((c) => {
     const prev = merged.get(c.origin);
     if (prev) {
       const u = new Map<string, Departure>();
-      [...prev.departures, ...c.departures].forEach((d) =>
-        u.set(`${d.time}${d.ramal ?? ''}`, d),
-      );
+      [...prev.departures, ...c.departures].forEach((d) => u.set(`${d.time}${d.ramal ?? ''}`, d));
       prev.departures = [...u.values()].sort((a, b) => a.minutes - b.minutes);
-    } else {
-      merged.set(c.origin, { ...c });
-    }
+    } else merged.set(c.origin, { ...c });
   });
-  columns = [...merged.values()].filter((c) => c.departures.length > 0);
+  columns = [...merged.values()];
 
   let rawText: string | undefined;
   if (!columns.length) {
-    columns = parseStructuredTextLines(lines);
+    columns = parseFlow(lines, true);
+    if (!columns.length) columns = parseFlow(lines, false);
+    if (!columns.length) rawText = lines.join('\n').slice(0, 6000);
   }
 
-  if (!columns.length) {
-    const times: Departure[] = [];
-    const re = /\b([01]?\d|2[0-3]):([0-5]\d)\b/g;
-    lines.join('\n').replace(re, (_m, h, m) => {
-      const hh = parseInt(h, 10);
-      const mm = parseInt(m, 10);
-      times.push({
-        time: `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`,
-        minutes: hh * 60 + mm,
-      });
-      return '';
-    });
-    if (times.length) {
-      const u = new Map(times.map((d) => [d.time, d]));
-      columns = [
-        {
-          origin: 'Horários de Partida',
-          isTerminal: true,
-          departures: [...u.values()].sort((a, b) => a.minutes - b.minutes),
-        },
-      ];
-    } else {
-      rawText = lines.join('\n').slice(0, 6000);
-    }
+  // Circulares: coluna sem nome vira "Saídas (circular)"
+  if (CIRCULAR_MAIN.has(code)) {
+    columns = columns.map((c) => (/^(partidas|todos os hor[aá]rios)$/i.test(c.origin) ? { ...c, origin: 'Saídas (circular)' } : c));
   }
 
   columns.sort((a, b) => Number(b.isTerminal) - Number(a.isTerminal));
@@ -519,93 +494,59 @@ export function parseTimetable(html: string, code: string, day: DayCode): Timeta
 
 const tableKey = (code: string, day: DayCode) => `${TABLE_PREFIX}${code}-${day}`;
 
-/** Gera lista de URLs candidatas para garantir que nenhuma linha falhe */
-async function candidateUrlsFor(code: string, day: DayCode): Promise<string[]> {
-  if (!memoryLinks) {
-    memoryLinks = (await getJSON<LinkMap>(LINKS_KEY)) ?? {};
-  }
-  const k = resolveLineKey(code);
-  const fromModal = memoryLinks[k]?.[day];
-
-  const stripped = code.replace(/^0+/, '');
-  const candidates = [
-    fromModal,
-    `https://www.faol.com.br/tabelas/${code}-${day}`,
-    `https://faol.com.br/tabelas/${code}-${day}`,
-    stripped !== code ? `https://www.faol.com.br/tabelas/${stripped}-${day}` : undefined,
-    // Linhas circulares (100, 200, 400, 500) muitas vezes usam sufixo -C ou código direto
-    day !== 'C' && ['100', '200', '400', '500'].includes(code)
-      ? `https://www.faol.com.br/tabelas/${code}-C`
-      : undefined,
-    day !== 'U' && ['100', '200', '400', '500'].includes(code)
-      ? `https://www.faol.com.br/tabelas/${code}-U`
-      : undefined,
-  ].filter(Boolean) as string[];
-
-  return [...new Set(candidates)];
+async function tableUrls(code: string, day: DayCode): Promise<string[]> {
+  const cache = await getJSON<AlertsCache>(ALERTS_KEY);
+  const fromLinks = cache?.links?.[lineKey(code)]?.[day];
+  return [...new Set([fromLinks, faolTableUrl(code, day)].filter(Boolean) as string[])];
 }
 
-export async function getTimetable(
-  code: string,
-  day: DayCode,
-  force = false,
-): Promise<TimetableResult> {
+export async function getTableUrl(code: string, day: DayCode): Promise<string> {
+  return (await tableUrls(code, day))[0];
+}
+
+export async function getTimetable(code: string, day: DayCode, force = false): Promise<TimetableResult> {
   const cached = await getJSON<Timetable>(tableKey(code, day));
   if (cached && !force && Date.now() - cached.fetchedAt < TABLE_MAX_AGE_MS) {
     return { table: cached, fromCache: true };
   }
 
-  // Tratamento especial documentado pela FAOL: Linha 54 aos Domingos
-  if (code === '54' && day === 'D') {
+  let ok: { html: string; url: string } | null = null;
+  let lastStatus = 0;
+  let lastError = '';
+  for (const url of await tableUrls(code, day)) {
+    const { res, html } = await fetchHtml('faol-table', url, (h) => {
+      const t = parseTimetable(h, code, day);
+      return { columns: t.columns.map((c) => ({ origin: c.origin, isTerminal: c.isTerminal, count: c.departures.length })), legend: t.legend };
+    });
+    lastStatus = res.status;
+    lastError = res.error ?? '';
+    if (res.ok && html) {
+      ok = { html, url };
+      break;
+    }
+  }
+
+  if (!ok) {
+    if (cached) return { table: cached, fromCache: true };
     return {
       table: null,
       fromCache: false,
-      error:
-        'Aos domingos e feriados, o atendimento da linha 54 (Pilões) é feito pelas linhas 53 (Conquista), 55 (São Lourenço) e 500 (Circular). Consulte Dias Úteis/Sábado ou abra as linhas 53/55.',
+      error: lastStatus === 404 ? 'Esta tabela não existe para este dia.' : `Sem conexão e sem cópia offline (${lastError || 'erro'}).`,
     };
   }
 
-  const urls = await candidateUrlsFor(code, day);
-  let lastError = 'Tabela não encontrada para este dia.';
-
-  for (const url of urls) {
-    const { res, html } = await fetchHtml(`faol-table`, url, (h) => {
-      const t = parseTimetable(h, code, day);
-      return {
-        columns: t.columns.map((c) => ({
-          origin: c.origin,
-          isTerminal: c.isTerminal,
-          count: c.departures.length,
-        })),
-        legend: t.legend,
-      };
-    });
-
-    if (res.ok && html) {
-      const table = parseTimetable(html, code, day);
-      const hasData = table.columns.some((c) => c.departures.length > 0);
-      if (hasData) {
-        await setJSON(tableKey(code, day), table);
-        return { table, fromCache: false };
-      }
-    }
-    lastError =
-      res.status === 404
-        ? 'A FAOL não disponibiliza tabela para esta linha neste dia da semana.'
-        : `Falha ao consultar tabela (${res.error ?? 'HTTP ' + res.status}).`;
-  }
-
-  if (cached) return { table: cached, fromCache: true };
-  return { table: null, fromCache: false, error: lastError };
+  const table: Timetable = { ...parseTimetable(ok.html, code, day), sourceUrl: ok.url };
+  if (table.columns.some((c) => c.departures.length)) await setJSON(tableKey(code, day), table);
+  else if (cached) return { table: cached, fromCache: true };
+  return { table, fromCache: false };
 }
 
 export function daysForLine(code: string): DayCode[] {
-  if (code === '54') return ['U', 'S', 'C', 'D'];
   return CIRCULAR_TABLE_LINES.has(code) ? ['U', 'S', 'D', 'C'] : ['U', 'S', 'D'];
 }
 
 export async function downloadAllDays(code: string): Promise<{ ok: number; total: number }> {
-  const days = daysForLine(code);
+  const days = daysForLine(code).filter((d) => !(code === '54' && d === 'D'));
   let ok = 0;
   for (const d of days) {
     const r = await getTimetable(code, d, true);
@@ -624,6 +565,9 @@ export async function clearCachedTables(): Promise<void> {
   await Promise.all(keys.map(removeKey));
 }
 
+// =====================================================================
+// Próximas saídas
+// =====================================================================
 export interface NextByColumn {
   origin: string;
   isTerminal: boolean;
@@ -634,21 +578,13 @@ export interface NextByColumn {
 
 export function nextByColumn(table: Timetable, nowMin: number): NextByColumn[] {
   return table.columns.map((c) => {
-    const upcoming = c.departures.filter((d) => d.minutes >= Math.floor(nowMin));
-    const next = upcoming.find((d) => d.minutes >= nowMin) ?? c.departures[0];
-    const isTomorrow = next && next.minutes < nowMin;
-    const idx = next ? c.departures.indexOf(next) : -1;
-    const diff = next
-      ? isTomorrow
-        ? 1440 - nowMin + next.minutes
-        : next.minutes - nowMin
-      : undefined;
+    const upcoming = c.departures.filter((d) => d.minutes >= nowMin);
     return {
       origin: c.origin,
       isTerminal: c.isTerminal,
-      next,
-      after: idx >= 0 ? c.departures[(idx + 1) % c.departures.length] : undefined,
-      minutesLeft: diff,
+      next: upcoming[0],
+      after: upcoming[1],
+      minutesLeft: upcoming[0] ? upcoming[0].minutes - nowMin : undefined,
     };
   });
 }

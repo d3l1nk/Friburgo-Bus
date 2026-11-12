@@ -90,9 +90,13 @@ export interface FaolAlert {
   text: string;
 }
 
+/** Links reais da FAOL por linha (chave = lineKey) e dia. */
+export type FaolLinks = Record<string, Partial<Record<DayCode, string>>>;
+
 export interface AlertsCache {
   savedAt: number;
   alerts: FaolAlert[];
+  links?: FaolLinks;
 }
 
 export interface Departure {
@@ -113,6 +117,7 @@ export interface Timetable {
   fetchedAt: number;
   columns: TimetableColumn[];
   legend: { code: string; label: string }[];
+  sourceUrl?: string; // página original da FAOL
   rawText?: string; // só guardado quando o parser não achou horários
 }
 

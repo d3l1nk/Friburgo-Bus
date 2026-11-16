@@ -4,6 +4,11 @@ on:
   push:
     branches: [main, master]
   workflow_dispatch:
+    inputs:
+      diagnostics:
+        description: 'Incluir telas técnicas de diagnóstico (somente para testes)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -32,6 +37,8 @@ jobs:
 
       - name: Build web app (dist)
         run: npm run build
+        env:
+          VITE_DIAGNOSTICS: ${{ github.event.inputs.diagnostics == 'true' && 'true' || 'false' }}
 
       - name: Add Android platform (if missing)
         run: |
@@ -39,7 +46,7 @@ jobs:
             npx cap add android
           fi
 
-      - name: Patch AndroidManifest (permissions + cleartext)
+      - name: Patch Android (permissions, icons, version)
         run: python3 scripts/patch-android.py
 
       - name: Upgrade Gradle wrapper for JDK 21
@@ -60,6 +67,6 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
+          name: where-is-my-bus-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error

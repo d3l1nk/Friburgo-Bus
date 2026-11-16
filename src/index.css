@@ -65,3 +65,12 @@ pre {
 /* Glassmorphism */
 .glass { background: rgba(17, 26, 36, 0.66); -webkit-backdrop-filter: blur(14px) saturate(1.3); backdrop-filter: blur(14px) saturate(1.3); border: 1px solid rgba(255, 255, 255, 0.09); }
 .glass-strong { background: rgba(17, 26, 36, 0.88); -webkit-backdrop-filter: blur(18px) saturate(1.3); backdrop-filter: blur(18px) saturate(1.3); border-top: 1px solid rgba(255, 255, 255, 0.1); }
+
+/* Tabela original da FAOL exibida dentro do app */
+.faol-html { overflow-x: auto; }
+.faol-html table { border-collapse: collapse; min-width: 100%; margin: 0 0 16px; }
+.faol-html th, .faol-html td { border: 1px solid #2f4256; padding: 6px 10px; text-align: center; font-family: 'Barlow Condensed', sans-serif; font-size: 18px; white-space: nowrap; }
+.faol-html th { background: #223141; color: #9db2c9; font-weight: 600; }
+.faol-html p { margin: 4px 0; font-size: 15px; white-space: normal; }
+
+@keyframes fadeout { to { opacity: 0; visibility: hidden; } }

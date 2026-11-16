@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { MapContainer, Marker, TileLayer, useMap } from 'react-leaflet';
+import { MapContainer, Marker, TileLayer, useMap, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import { ArrowLeft, Bug, Bus, ChevronDown, ChevronUp, Crosshair, Layers, MapPin, RefreshCw, Star, WifiOff, X } from 'lucide-react';
 import { Empty, IconBtn, LineBadge } from './ui';
 import { ESTACAO_LIVRE, formatDistance, haversine, type GeoFix } from '../lib/geo';
 import { getJSON, setJSON } from '../lib/storage';
 import { usePolling } from '../lib/time';
+import AppIcon from './AppIcon';
+import { DIAGNOSTICS_ENABLED } from '../config';
 import { findLine, resolveLineKey } from '../data/faolLines';
 import { getNearbyStops, getStopArrivals } from '../services/merusApi';
 import type { Favorites, MerusArrival, MerusStop, MerusVehicle } from '../types';
@@ -13,34 +15,46 @@ import type { Favorites, MerusArrival, MerusStop, MerusVehicle } from '../types'
 // =====================================================================
 // Provedores de tiles (nenhum exige chave e todos funcionam no WebView Android)
 // =====================================================================
-type MapStyle = 'voyager' | 'dark' | 'satellite';
-
-const TILES: Record<MapStyle, { label: string; url: string; attribution: string; subdomains: string; maxZoom: number }> = {
-  voyager: {
+type MapStyle = 'ruas' | 'escuro' | 'satelite';
+interface Source {
+  url: string;
+  overlay?: string; // camada de rótulos por cima
+  attribution: string;
+  subdomains?: string;
+  maxNativeZoom: number;
+}
+// A Esri é a fonte principal (funciona no WebView Android); CARTO fica como reserva.
+const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services';
+const STYLES: Record<MapStyle, { label: string; sources: Source[] }> = {
+  ruas: {
     label: 'Ruas',
-    url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png',
-    attribution: '&copy; OpenStreetMap &copy; CARTO',
-    subdomains: 'abcd',
-    maxZoom: 20,
+    sources: [
+      { url: `${ESRI}/World_Street_Map/MapServer/tile/{z}/{y}/{x}`, attribution: 'Tiles &copy; Esri', maxNativeZoom: 19 },
+      { url: 'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', attribution: '&copy; OpenStreetMap &copy; CARTO', subdomains: 'abcd', maxNativeZoom: 20 },
+    ],
   },
-  dark: {
+  escuro: {
     label: 'Escuro',
-    url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
-    attribution: '&copy; OpenStreetMap &copy; CARTO',
-    subdomains: 'abcd',
-    maxZoom: 20,
+    sources: [
+      {
+        url: `${ESRI}/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}`,
+        overlay: `${ESRI}/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}`,
+        attribution: 'Tiles &copy; Esri',
+        maxNativeZoom: 16,
+      },
+      { url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', attribution: '&copy; OpenStreetMap &copy; CARTO', subdomains: 'abcd', maxNativeZoom: 20 },
+    ],
   },
-  satellite: {
+  satelite: {
     label: 'Satélite',
-    url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    attribution: 'Tiles &copy; Esri',
-    subdomains: 'abc',
-    maxZoom: 19,
+    sources: [{ url: `${ESRI}/World_Imagery/MapServer/tile/{z}/{y}/{x}`, attribution: 'Tiles &copy; Esri', maxNativeZoom: 19 }],
   },
 };
-const STYLE_ORDER: MapStyle[] = ['voyager', 'dark', 'satellite'];
-const FALLBACK_NEXT: Record<MapStyle, MapStyle> = { voyager: 'dark', dark: 'satellite', satellite: 'voyager' };
-const STYLE_KEY = 'map:style:v1';
+const STYLE_ORDER: MapStyle[] = ['ruas', 'escuro', 'satelite'];
+const NEXT_STYLE: Record<MapStyle, MapStyle> = { ruas: 'satelite', satelite: 'escuro', escuro: 'ruas' };
+const STYLE_KEY = 'map:style:v2';
+/** Abaixo deste zoom os marcadores de pontos somem para manter o mapa limpo. */
+const MIN_STOP_ZOOM = 15;
 
 // =====================================================================
 // Ícones (criados uma única vez)
@@ -61,6 +75,12 @@ function busIcon(code: string, mode: '' | 'dim' | 'hi'): L.DivIcon {
 const busCode = (v: MerusVehicle) => findLine(v.lineKey)?.code ?? (v.lineLabel.match(/\d{1,3}[A-Za-z]?/)?.[0] ?? '?');
 
 type Target = { lat: number; lng: number; zoom?: number; n: number };
+
+function ZoomWatcher({ onZoom }: { onZoom: (z: number) => void }) {
+  const map = useMapEvents({ zoomend: () => onZoom(map.getZoom()) });
+  useEffect(() => onZoom(map.getZoom()), [map, onZoom]);
+  return null;
+}
 
 function MapController({ active, target }: { active: boolean; target: Target | null }) {
   const map = useMap();
@@ -117,30 +137,39 @@ export default function RadarTab(p: Props) {
   const [target, setTarget] = useState<Target | null>(null);
 
   // mapa: estilo + fallback automático
-  const [style, setStyle] = useState<MapStyle>('voyager');
+  const [style, setStyle] = useState<MapStyle>('ruas');
+  const [srcIdx, setSrcIdx] = useState(0);
+  const [zoom, setZoom] = useState(16);
+  const [busSel, setBusSel] = useState<MerusVehicle | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
   const tileErr = useRef({ count: 0, switches: 0 });
   useEffect(() => {
-    getJSON<MapStyle>(STYLE_KEY).then((s) => s && TILES[s] && setStyle(s));
+    getJSON<MapStyle>(STYLE_KEY).then((s) => s && STYLES[s] && setStyle(s));
   }, []);
   const pickStyle = (s: MapStyle) => {
     tileErr.current = { count: 0, switches: 0 };
     setStyle(s);
+    setSrcIdx(0);
     setMenuOpen(false);
     void setJSON(STYLE_KEY, s);
   };
   const onTileError = () => {
     const e = tileErr.current;
     e.count++;
-    if (e.count >= 4 && e.switches < 3) {
-      e.count = 0;
-      e.switches++;
-      const next = FALLBACK_NEXT[style];
-      setToast(`O mapa "${TILES[style].label}" não carregou. Usando "${TILES[next].label}".`);
+    if (e.count < 4 || e.switches >= 4) return;
+    e.count = 0;
+    e.switches++;
+    if (srcIdx + 1 < STYLES[style].sources.length) {
+      setSrcIdx(srcIdx + 1);
+      setToast('Trocando o servidor do mapa…');
+    } else {
+      const next = NEXT_STYLE[style];
+      setToast(`O mapa "${STYLES[style].label}" não carregou. Usando "${STYLES[next].label}".`);
       setStyle(next);
-      setTimeout(() => setToast(null), 4500);
+      setSrcIdx(0);
     }
+    setTimeout(() => setToast(null), 4500);
   };
 
   const loadStops = async (force: boolean) => {
@@ -212,7 +241,15 @@ export default function RadarTab(p: Props) {
     () =>
       p.vehicles.map((v, i) => {
         const mode = p.highlight ? (v.lineKey === p.highlight ? 'hi' : 'dim') : '';
-        return <Marker key={`${v.id}-${i}`} position={[v.lat, v.lng]} icon={busIcon(busCode(v), mode)} zIndexOffset={mode === 'hi' ? 900 : 500} />;
+        return (
+          <Marker
+            key={`${v.id}-${i}`}
+            position={[v.lat, v.lng]}
+            icon={busIcon(busCode(v), mode)}
+            zIndexOffset={mode === 'hi' ? 900 : 500}
+            eventHandlers={{ click: () => setBusSel(v) }}
+          />
+        );
       }),
     [p.vehicles, p.highlight],
   );
@@ -236,7 +273,9 @@ export default function RadarTab(p: Props) {
   const isFav = (id: string) => p.favs.stops.some((s) => s.id === id);
   const highlightLine = p.highlight ? findLine(p.highlight) : undefined;
   const fresh = p.vehiclesAt > 0 && !p.vehiclesError;
-  const t = TILES[style];
+  const src = STYLES[style].sources[Math.min(srcIdx, STYLES[style].sources.length - 1)];
+  const busNow = busSel ? p.vehicles.find((v) => v.id === busSel.id) ?? busSel : null;
+  const visibleStops = zoom >= MIN_STOP_ZOOM ? stopMarkers : selected ? stopMarkers.filter((m) => m.key === selected.id) : [];
 
   return (
     <div className="relative h-full w-full overflow-hidden">
@@ -245,19 +284,23 @@ export default function RadarTab(p: Props) {
         zoom={16}
         zoomControl={false}
         attributionControl
+        maxZoom={19}
         className="absolute inset-0 w-full h-full isolate"
       >
         <TileLayer
-          key={style}
-          url={t.url}
-          attribution={t.attribution}
-          subdomains={t.subdomains}
-          maxZoom={t.maxZoom}
+          key={`${style}-${srcIdx}`}
+          url={src.url}
+          attribution={src.attribution}
+          subdomains={src.subdomains ?? 'abc'}
+          maxNativeZoom={src.maxNativeZoom}
+          maxZoom={19}
           eventHandlers={{ tileerror: onTileError }}
         />
+        {src.overlay && <TileLayer key={`ov-${style}-${srcIdx}`} url={src.overlay} maxNativeZoom={16} maxZoom={19} zIndex={5} />}
+        <ZoomWatcher onZoom={setZoom} />
         <MapController active={p.active} target={target} />
         <Marker position={[pos.lat, pos.lng]} icon={ICON_ME} interactive={false} />
-        {stopMarkers}
+        {visibleStops}
         {busMarkers}
       </MapContainer>
 
@@ -265,6 +308,7 @@ export default function RadarTab(p: Props) {
       <div className="absolute inset-x-0 top-0 z-[1000] px-3 pointer-events-none" style={{ paddingTop: 'calc(env(safe-area-inset-top, 0px) + 12px)' }}>
         <div className="glass pointer-events-auto flex items-center gap-1 rounded-2xl h-14 pl-4 pr-1 shadow-lg shadow-black/30">
           <div className="flex items-center gap-4 flex-1 min-w-0">
+            <AppIcon size={30} />
             <div className="flex items-center gap-2">
               <span className="relative grid place-items-center">
                 <Bus size={20} className={fresh ? 'text-go' : 'text-slate-500'} />
@@ -293,7 +337,7 @@ export default function RadarTab(p: Props) {
           >
             <Crosshair size={20} />
           </IconBtn>
-          <IconBtn onClick={p.onOpenDiag} label="Inspecionar JSON"><Bug size={19} /></IconBtn>
+          {DIAGNOSTICS_ENABLED && <IconBtn onClick={p.onOpenDiag} label="Inspecionar JSON"><Bug size={19} /></IconBtn>}
         </div>
 
         {menuOpen && (
@@ -304,7 +348,7 @@ export default function RadarTab(p: Props) {
                 onClick={() => pickStyle(s)}
                 className={`w-full text-left h-10 px-3 rounded-lg text-sm font-medium ${style === s ? 'bg-route text-ink-950' : 'text-slate-200 active:bg-ink-700'}`}
               >
-                {TILES[s].label}
+                {STYLES[s].label}
               </button>
             ))}
           </div>
@@ -314,6 +358,9 @@ export default function RadarTab(p: Props) {
           {p.geo?.usingFallback && (
             <div className="pointer-events-auto glass text-warn text-xs rounded-lg px-3 py-1.5">GPS indisponível. Usando a Estação Livre como referência.</div>
           )}
+          {zoom < MIN_STOP_ZOOM && stops.length > 0 && (
+            <div className="pointer-events-auto glass text-slate-300 text-xs rounded-lg px-3 py-1.5">Aproxime o mapa para ver os pontos.</div>
+          )}
           {highlightLine && (
             <button onClick={() => p.setHighlight(null)} className="pointer-events-auto glass flex items-center gap-2 text-go rounded-full pl-3 pr-2 py-1 text-sm font-medium">
               Destacando linha {highlightLine.code} <X size={16} />
@@ -322,6 +369,24 @@ export default function RadarTab(p: Props) {
           {toast && <div className="pointer-events-auto glass text-slate-100 text-xs rounded-lg px-3 py-1.5">{toast}</div>}
         </div>
       </div>
+
+      {/* Cartão do ônibus tocado: linha + sentido */}
+      {busNow && (
+        <div className="glass absolute inset-x-3 z-[1000] rounded-2xl p-3 shadow-lg shadow-black/40" style={{ bottom: `calc(${expanded ? '70%' : '36%'} + 12px)` }}>
+          <div className="flex items-center gap-3">
+            <LineBadge code={busCode(busNow)} size="lg" />
+            <div className="flex-1 min-w-0">
+              <div className="text-xs text-slate-400 truncate">{findLine(busNow.lineKey)?.name ?? busNow.lineName ?? 'Linha'}</div>
+              <div className="font-sign text-2xl font-semibold leading-tight truncate">{busNow.direction || 'Sentido não informado'}</div>
+              <div className="text-xs text-slate-400 mt-0.5">
+                Veículo {busNow.id}
+                {busNow.speed !== null && ` · ${Math.round(busNow.speed)} km/h`}
+              </div>
+            </div>
+            <IconBtn onClick={() => setBusSel(null)} label="Fechar"><X size={20} /></IconBtn>
+          </div>
+        </div>
+      )}
 
       {/* Bottom sheet */}
       <div

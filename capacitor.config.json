@@ -1,6 +1,6 @@
 {
   "appId": "br.com.novafriburgo.onibus",
-  "appName": "Friburgo Bus",
+  "appName": "Where is my bus?",
   "webDir": "dist",
   "server": {
     "androidScheme": "https",

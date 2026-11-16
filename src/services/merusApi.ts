@@ -239,6 +239,16 @@ export function normalizeArrivals(raw: unknown): MerusArrival[] {
 }
 
 // ---------- Veículos ----------
+/** "Rodoviária" -> "Sentido Rodoviária"; 0/1 e IDA/VOLTA viram "Ida"/"Volta". */
+export function formatDirection(raw: string): string {
+  const t = raw.trim();
+  if (!t) return '';
+  if (/^(0|ida)$/i.test(t)) return 'Ida';
+  if (/^(1|volta)$/i.test(t)) return 'Volta';
+  if (/^\d+$/.test(t)) return '';
+  return /^sentido\b/i.test(t) ? t.replace(/^sentido\s*:?\s*/i, 'Sentido ') : `Sentido ${t}`;
+}
+
 export function normalizeVehicles(raw: unknown): MerusVehicle[] {
   const out: MerusVehicle[] = [];
   findArray(raw).forEach((item, i) => {
@@ -253,7 +263,7 @@ export function normalizeVehicles(raw: unknown): MerusVehicle[] {
       lat: c.lat,
       lng: c.lng,
       heading: toNum(pick(item, ['heading', 'angulo', 'rumo', 'direcao_graus', 'nr_angulo', 'course', 'bearing'])),
-      direction: labelOf(pick(item, ['sentido', 'ds_sentido', 'destino', 'direcao'])),
+      direction: formatDirection(labelOf(pick(item, ['ds_sentido', 'sentido', 'destino', 'ds_destino', 'nome_destino', 'headsign', 'itinerario', 'ds_itinerario', 'direcao']))),
       speed: toNum(pick(item, ['velocidade', 'speed', 'nr_velocidade'])),
       updatedAt: labelOf(pick(item, ['datahora', 'data_hora', 'dt_posicao', 'dt_atualizacao', 'ultima_atualizacao', 'timestamp', 'data'])),
       raw: item,

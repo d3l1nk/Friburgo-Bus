@@ -14,6 +14,7 @@ interface Props {
   toggleFavLine: (code: string) => void;
   onShowOnMap: (key: string) => void;
   onCacheChanged: () => void;
+  onCreateAlert: (code: string) => void;
 }
 
 const norm = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
@@ -68,6 +69,7 @@ export default function LinesTab(p: Props) {
         onShowOnMap={() => p.onShowOnMap(key)}
         onCacheChanged={p.onCacheChanged}
         onOpenLine={p.setOpenCode}
+        onCreateAlert={p.onCreateAlert}
       />
     );
   }

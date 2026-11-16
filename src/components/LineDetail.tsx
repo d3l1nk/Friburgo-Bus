@@ -1,10 +1,10 @@
 import { memo, useCallback, useEffect, useMemo, useState } from 'react';
-import { ArrowLeft, Bus, Check, Download, ExternalLink, Info, MapPinned, RefreshCw, Star, WifiOff } from 'lucide-react';
+import { ArrowLeft, Bell, Bus, Check, Download, FileText, Info, MapPinned, RefreshCw, Star, WifiOff } from 'lucide-react';
+import OriginalTableSheet from './OriginalTableSheet';
 import { AlertBanner, Header, IconBtn } from './ui';
 import { DAY_LABEL, dayTypeOf, etaParts, minutesOfDay, useNow } from '../lib/time';
-import { openExternal } from '../lib/openUrl';
 import { CIRCULAR_MAIN, CIRCULAR_NOTE, REGION_LABEL, dayReplacement } from '../data/faolLines';
-import { daysForLine, downloadAllDays, faolTableUrl, getTableUrl, getTimetable, nextByColumn, type NextByColumn } from '../services/faolScraper';
+import { daysForLine, downloadAllDays, faolTableUrl, getTimetable, nextByColumn, type NextByColumn } from '../services/faolScraper';
 import type { DayCode, FaolAlert, FaolLine, MerusVehicle, Timetable, TimetableResult } from '../types';
 
 interface Props {
@@ -17,6 +17,7 @@ interface Props {
   onShowOnMap: () => void;
   onCacheChanged: () => void;
   onOpenLine: (code: string) => void;
+  onCreateAlert: (code: string) => void;
 }
 
 const RAMAL_COLORS = ['#3b9cff', '#2dd4a0', '#fbbf24', '#f472b6', '#a78bfa', '#fb923c'];
@@ -33,6 +34,7 @@ export default function LineDetail(p: Props) {
   const [onlyUpcoming, setOnlyUpcoming] = useState(true);
   const [downloading, setDownloading] = useState(false);
   const [dlMsg, setDlMsg] = useState<string | null>(null);
+  const [showOriginal, setShowOriginal] = useState(false);
 
   const load = useCallback(
     async (d: DayCode, force = false) => {
@@ -63,10 +65,7 @@ export default function LineDetail(p: Props) {
   const replacement = dayReplacement(p.line.code, day);
   const todayReplacement = dayReplacement(p.line.code, today);
 
-  const openOriginal = async () => {
-    const url = viewTable?.sourceUrl ?? (await getTableUrl(p.line.code, day).catch(() => faolTableUrl(p.line.code, day)));
-    void openExternal(url);
-  };
+  const openOriginal = () => setShowOriginal(true);
 
   const download = async () => {
     setDownloading(true);
@@ -100,6 +99,10 @@ export default function LineDetail(p: Props) {
 
         <LiveCard vehicles={p.vehicles} onShowOnMap={p.onShowOnMap} />
 
+        <button onClick={() => p.onCreateAlert(p.line.code)} className="w-full h-12 rounded-xl border border-route/50 bg-route-soft/40 text-route font-semibold flex items-center justify-center gap-2 active:bg-route-soft">
+          <Bell size={18} /> Avisar-me sobre esta linha
+        </button>
+
         <NextCards table={todayTable} loading={!todayRes || todayRes === 'loading'} replacementText={todayReplacement?.text} />
 
         <section>
@@ -107,7 +110,7 @@ export default function LineDetail(p: Props) {
             <h2 className="font-sign text-xl font-semibold">Grade de horários</h2>
             <div className="flex items-center gap-1">
               <button onClick={openOriginal} className="h-9 px-3 rounded-full bg-ink-800 border border-ink-600 text-sm flex items-center gap-1.5 active:bg-ink-700">
-                <ExternalLink size={14} /> Ver tabela original
+                <FileText size={14} /> Tabela original
               </button>
               <button onClick={() => load(day, true)} className="h-9 w-9 grid place-items-center rounded-full text-slate-300 active:bg-ink-700" aria-label="Atualizar tabela">
                 <RefreshCw size={16} className={viewRes === 'loading' ? 'animate-spin' : ''} />
@@ -177,6 +180,17 @@ export default function LineDetail(p: Props) {
         </button>
         {dlMsg && <div className="text-sm text-slate-300 text-center">{dlMsg}</div>}
       </div>
+
+      {showOriginal && (
+        <OriginalTableSheet
+          lineCode={p.line.code}
+          lineName={p.line.name}
+          dayLabelKey={day}
+          table={viewTable}
+          siteUrl={viewTable?.sourceUrl ?? faolTableUrl(p.line.code, day)}
+          onClose={() => setShowOriginal(false)}
+        />
+      )}
     </div>
   );
 }
@@ -300,7 +314,7 @@ function Grid(props: {
       <div className="rounded-xl bg-warn-soft border border-warn/40 p-3 text-sm space-y-2">
         <div className="font-medium text-warn">Não consegui ler esta tabela automaticamente.</div>
         <div className="text-slate-300">O layout da página pode ter mudado. Abra a tabela original ou veja o conteúdo bruto na aba Diagnóstico.</div>
-        <button onClick={props.onOpenOriginal} className="h-10 px-4 rounded-full bg-ink-800 border border-ink-600 flex items-center gap-2"><ExternalLink size={15} /> Ver tabela original</button>
+        <button onClick={props.onOpenOriginal} className="h-10 px-4 rounded-full bg-ink-800 border border-ink-600 flex items-center gap-2"><FileText size={15} /> Ver tabela original</button>
         {table.rawText && <pre className="text-xs whitespace-pre-wrap max-h-48 overflow-auto text-slate-400">{table.rawText}</pre>}
       </div>
     );

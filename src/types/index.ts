@@ -1,7 +1,8 @@
 // ---------- Geral ----------
 export type LatLng = { lat: number; lng: number };
 export type DayCode = 'U' | 'S' | 'D' | 'C';
-export type TabId = 'radar' | 'lines' | 'favorites' | 'diag';
+export type TabId = 'radar' | 'lines' | 'luiz' | 'favorites' | 'settings';
+export type SettingsView = 'main' | 'about' | 'feedback' | 'alerts' | 'diag';
 
 export type RegionId =
   | 'circular'
@@ -118,6 +119,7 @@ export interface Timetable {
   columns: TimetableColumn[];
   legend: { code: string; label: string }[];
   sourceUrl?: string; // página original da FAOL
+  originalHtml?: string; // tabela original higienizada (visualização dentro do app)
   rawText?: string; // só guardado quando o parser não achou horários
 }
 
@@ -131,4 +133,31 @@ export interface TimetableResult {
 export interface Favorites {
   lines: string[];
   stops: { id: string; name: string; lat: number; lng: number }[];
+}
+
+// ---------- Alertas / notificações ----------
+export type AlertRuleType = 'schedule' | 'depart' | 'pass';
+
+export interface AlertRule {
+  id: string;
+  nid: number; // base numérica dos IDs de notificação (único por regra)
+  type: AlertRuleType;
+  lineCode: string;
+  enabled: boolean;
+  // schedule: aviso programado antes da saída de uma origem da tabela
+  originName?: string;
+  leadMin?: number;
+  // depart/pass: acompanhamento por GPS (app aberto)
+  stop?: { id: string; name: string; lat: number; lng: number };
+  radius?: number;
+  createdAt: number;
+}
+
+export interface FeedbackItem {
+  id: string;
+  kind: 'reclamacao' | 'sugestao' | 'elogio';
+  lineCode?: string;
+  message: string;
+  contact?: string;
+  createdAt: number;
 }

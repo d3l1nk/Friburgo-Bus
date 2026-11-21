@@ -3,6 +3,7 @@ name: Build Android APK
 on:
   push:
     branches: [main, master]
+  pull_request:
   workflow_dispatch:
     inputs:
       diagnostics:
@@ -13,58 +14,99 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build:
+  quality:
+    name: Lint, tipos e testes
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Instalar dependências (determinístico)
+        run: npm ci --no-audit --no-fund
+
+      - name: Lint (ESLint)
+        run: npm run lint
+
+      - name: Formatação (Prettier)
+        run: npm run format:check
+
+      - name: Checagem de tipos
+        run: npm run typecheck
+
+      - name: Testes unitários (Vitest)
+        run: npm test
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Testes do script nativo (Python)
+        run: python -m unittest discover -s scripts -p "test_*.py" -v
+
+  apk:
+    name: Gerar APK
+    needs: quality
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js 20
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
-      - name: Setup Java JDK 21
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
 
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
+      - name: Instalar dependências (determinístico)
+        run: npm ci --no-audit --no-fund
 
-      - name: Build web app (dist)
+      - name: Build web (dist)
         run: npm run build
         env:
           VITE_DIAGNOSTICS: ${{ github.event.inputs.diagnostics == 'true' && 'true' || 'false' }}
 
-      - name: Add Android platform (if missing)
+      - name: Adicionar plataforma Android (se faltar)
         run: |
           if [ ! -d "android" ]; then
             npx cap add android
           fi
 
-      - name: Patch Android (permissions, icons, version)
-        run: python3 scripts/patch-android.py
+      - name: Ajustar projeto Android (permissões, ícones, versão)
+        run: python3 scripts/patch_android.py
+        env:
+          GITHUB_RUN_NUMBER: ${{ github.run_number }}
 
-      - name: Upgrade Gradle wrapper for JDK 21
+      - name: Atualizar Gradle wrapper para o JDK 21
         run: |
           sed -i 's#distributionUrl=.*#distributionUrl=https\\://services.gradle.org/distributions/gradle-8.7-all.zip#' android/gradle/wrapper/gradle-wrapper.properties
           cat android/gradle/wrapper/gradle-wrapper.properties
 
-      - name: Sync Capacitor
+      - name: Sincronizar Capacitor
         run: npx cap sync android
 
-      - name: Make Gradle executable
+      - name: Permissão de execução do Gradle
         run: chmod +x android/gradlew
 
-      - name: Build debug APK
+      - name: Compilar APK de debug
         working-directory: android
         run: ./gradlew assembleDebug --no-daemon --stacktrace
 
-      - name: Upload APK
+      - name: Publicar APK
         uses: actions/upload-artifact@v4
         with:
           name: where-is-my-bus-debug-apk

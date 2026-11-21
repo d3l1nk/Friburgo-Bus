@@ -1,0 +1,10 @@
+node_modules
+dist
+android
+coverage
+snapshots
+package-lock.json
+resources
+store
+*.md
+__fixtures__

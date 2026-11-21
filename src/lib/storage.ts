@@ -12,7 +12,7 @@ export async function getJSON<T>(key: string): Promise<T | null> {
 export async function setJSON(key: string, value: unknown): Promise<void> {
   try {
     await Preferences.set({ key, value: JSON.stringify(value) });
-  } catch (e) {
+  } catch (e: unknown) {
     console.warn('storage.set falhou', key, e);
   }
 }

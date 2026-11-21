@@ -10,11 +10,22 @@ export function buildHtmlDocument(title: string, bodyHtml: string, sourceUrl?: s
 }
 
 /** Salva o arquivo e abre o menu de compartilhar do Android (permite "Salvar em Arquivos/Drive"). */
-export async function saveAndShare(filename: string, title: string, content: string): Promise<'shared' | 'downloaded' | 'failed'> {
+export async function saveAndShare(
+  filename: string,
+  title: string,
+  content: string,
+): Promise<'shared' | 'downloaded' | 'failed'> {
   try {
-    const canShare = await Share.canShare().then((r) => r.value).catch(() => false);
+    const canShare = await Share.canShare()
+      .then((r) => r.value)
+      .catch(() => false);
     if (canShare) {
-      const res = await Filesystem.writeFile({ path: filename, data: content, directory: Directory.Cache, encoding: Encoding.UTF8 });
+      const res = await Filesystem.writeFile({
+        path: filename,
+        data: content,
+        directory: Directory.Cache,
+        encoding: Encoding.UTF8,
+      });
       await Share.share({ title, url: res.uri, dialogTitle: 'Salvar ou compartilhar tabela' });
       return 'shared';
     }

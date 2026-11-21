@@ -12,6 +12,13 @@ export const FAOL_CHANNEL_URL = 'https://www.faol.com.br/';
 /** TODO: e-mail que recebe reclamações/sugestões. Vazio = abre o menu de compartilhar do Android. */
 export const FEEDBACK_EMAIL = '';
 
+/**
+ * Opcional: URL do JSON pré-processado gerado pelo workflow "FAOL snapshot" (veja o README).
+ * Vazio = o app lê as páginas da FAOL diretamente, como antes.
+ * Exemplo: https://raw.githubusercontent.com/d3l1nk/Friburgo-Bus/main/snapshots/faol.json
+ */
+export const FAOL_SNAPSHOT_URL = '';
+
 export const LEGAL_TEXT = [
   'O Where is my bus? é uma iniciativa independente e gratuita. Não possui qualquer vínculo, patrocínio, parceria ou aprovação da FAOL, da Prefeitura de Nova Friburgo, da Merus Tracker (Partiu) ou de qualquer outra empresa ou órgão de transporte.',
   'Horários, avisos de desvio e posições dos ônibus são obtidos de fontes públicas e podem estar atrasados, incompletos ou incorretos, e mudar sem aviso. Para informações oficiais, consulte sempre os canais da concessionária.',

@@ -3,20 +3,28 @@ import { getJSON, setJSON } from '../lib/storage';
 import { ESTACAO_LIVRE, haversine } from '../lib/geo';
 import { dayTypeOf } from '../lib/time';
 import { dayReplacement, lineKey } from '../data/faolLines';
-import { getTimetable } from './faolScraper';
+import { getTimetable } from './faol';
 import type { AlertRule, MerusVehicle } from '../types';
 
 const RULES_KEY = 'alerts:rules:v1';
 const MAX_PER_RULE = 60;
 
-export const ESTACAO_LIVRE_STOP = { id: 'estacao-livre', name: 'Estação Livre (ponto final)', lat: ESTACAO_LIVRE.lat, lng: ESTACAO_LIVRE.lng };
+export const ESTACAO_LIVRE_STOP = {
+  id: 'estacao-livre',
+  name: 'Estação Livre (ponto final)',
+  lat: ESTACAO_LIVRE.lat,
+  lng: ESTACAO_LIVRE.lng,
+};
 
 export async function loadRules(): Promise<AlertRule[]> {
   return (await getJSON<AlertRule[]>(RULES_KEY)) ?? [];
 }
 export const saveRules = (rules: AlertRule[]) => setJSON(RULES_KEY, rules);
 
-export function newRule(existing: AlertRule[], partial: Omit<AlertRule, 'id' | 'nid' | 'createdAt' | 'enabled'>): AlertRule {
+export function newRule(
+  existing: AlertRule[],
+  partial: Omit<AlertRule, 'id' | 'nid' | 'createdAt' | 'enabled'>,
+): AlertRule {
   const nid = Math.max(0, ...existing.map((r) => r.nid)) + 1;
   return { ...partial, id: `r${Date.now().toString(36)}${nid}`, nid, enabled: true, createdAt: Date.now() };
 }
@@ -32,10 +40,16 @@ export async function ensurePermission(): Promise<boolean> {
   }
 }
 
-export async function notifyNow(title: string, body: string, id = Math.floor(Math.random() * 1e6) + 2_000_000): Promise<void> {
+export async function notifyNow(
+  title: string,
+  body: string,
+  id = Math.floor(Math.random() * 1e6) + 2_000_000,
+): Promise<void> {
   try {
     await LocalNotifications.schedule({
-      notifications: [{ id, title, body, schedule: { at: new Date(Date.now() + 400), allowWhileIdle: true } }],
+      notifications: [
+        { id, title, body, schedule: { at: new Date(Date.now() + 400), allowWhileIdle: true } },
+      ],
     });
   } catch {
     /* sem permissão */
@@ -66,13 +80,26 @@ export async function scheduleRule(rule: AlertRule): Promise<number> {
     const day = dayTypeOf(base);
     if (dayReplacement(rule.lineCode, day)) continue;
     const { table } = await getTimetable(rule.lineCode, day);
-    const col = table?.columns.find((c) => c.origin === rule.originName) ?? table?.columns.find((c) => c.isTerminal) ?? table?.columns[0];
+    const col =
+      table?.columns.find((c) => c.origin === rule.originName) ??
+      table?.columns.find((c) => c.isTerminal) ??
+      table?.columns[0];
     if (!col) continue;
     for (const d of col.departures) {
-      const at = new Date(base.getFullYear(), base.getMonth(), base.getDate(), Math.floor(d.minutes / 60), d.minutes % 60, 0);
+      const at = new Date(
+        base.getFullYear(),
+        base.getMonth(),
+        base.getDate(),
+        Math.floor(d.minutes / 60),
+        d.minutes % 60,
+        0,
+      );
       at.setTime(at.getTime() - lead * 60000);
       if (at.getTime() > now + 5000) {
-        items.push({ at, body: `Linha ${rule.lineCode} sai de ${col.origin} às ${d.time}${lead ? ` (em ${lead} min)` : ''}.` });
+        items.push({
+          at,
+          body: `Linha ${rule.lineCode} sai de ${col.origin} às ${d.time}${lead ? ` (em ${lead} min)` : ''}.`,
+        });
       }
     }
   }
@@ -122,7 +149,8 @@ export function evaluateLiveRules(rules: AlertRule[], vehicles: MerusVehicle[]):
       const k = `${r.id}|${v.id}`;
       const dist = haversine(point, v);
       const was = inside.get(k) ?? false;
-      const now = r.type === 'depart' ? (dist <= radius ? true : dist > radius + 100 ? false : was) : dist <= radius;
+      const now =
+        r.type === 'depart' ? (dist <= radius ? true : dist > radius + 100 ? false : was) : dist <= radius;
       inside.set(k, now);
       const trigger = r.type === 'depart' ? was && !now : !was && now;
       if (!trigger) continue;
@@ -140,7 +168,8 @@ export function evaluateLiveRules(rules: AlertRule[], vehicles: MerusVehicle[]):
 }
 
 export function describeRule(r: AlertRule): string {
-  if (r.type === 'schedule') return `Saída de ${r.originName ?? 'Estação Livre'}${r.leadMin ? `, ${r.leadMin} min antes` : ', na hora'}`;
+  if (r.type === 'schedule')
+    return `Saída de ${r.originName ?? 'Estação Livre'}${r.leadMin ? `, ${r.leadMin} min antes` : ', na hora'}`;
   if (r.type === 'depart') return `Ônibus saiu de ${(r.stop ?? ESTACAO_LIVRE_STOP).name}`;
   return `Ônibus passando em ${r.stop?.name ?? 'ponto'} (${r.radius ?? 300} m)`;
 }
